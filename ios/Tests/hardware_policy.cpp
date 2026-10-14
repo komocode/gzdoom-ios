@@ -175,5 +175,17 @@ int main()
                             assert(r.sceneScale >= 0.5f && r.sceneScale <= 1);
                         }
                     }
+    // Pixel art: nearest presentation, snapped down to an integer stretch when close.
+    assert(SelectPresentation(0.8f, false).linear && SelectPresentation(0.8f, false).outputScale == 0.8f);
+    assert(!SelectPresentation(0.8f, true).linear && SelectPresentation(0.8f, true).outputScale == 0.8f);
+    assert(SelectPresentation(0.52f, true).outputScale == 0.5f);
+    assert(SelectPresentation(0.49f, true).outputScale == 0.49f);
+    assert(SelectPresentation(1.f, true).outputScale == 1.f);
+    for (float scale = 0.3f; scale <= 1.f; scale += 0.01f)
+    {
+        auto pres = SelectPresentation(scale, true);
+        assert(pres.outputScale <= scale && pres.outputScale >= scale * 0.94f);
+    }
+
     puts("Apple capability profiles and adaptive GPU tuning checks passed.");
 }

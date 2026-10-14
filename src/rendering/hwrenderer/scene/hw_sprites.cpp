@@ -59,6 +59,7 @@
 #include "hw_dynlightdata.h"
 #include "hw_lightbuffer.h"
 #include "hw_renderstate.h"
+#include "hw_modernrender.h"
 #include "quaternion.h"
 
 #include "p_visualthinker.h"
@@ -110,9 +111,18 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 	bool foglayer = false;
 	int rel = fullbright ? 0 : getExtraLight();
 	auto &vp = di->Viewpoint;	
+	int gbufferMode = state.GetGBufferMode();
+
+	if (!modelframe) state.SetMaterialParams(0, 0);
 
 	if (translucent)
 	{
+		// Blended styles leave the reflection marker of the surface behind them alone.
+		if (RenderStyle.BlendOp != STYLEOP_Add || RenderStyle.DestAlpha == STYLEALPHA_One)
+		{
+			state.SetGBufferMode(GBUFFER_KEEP);
+		}
+
 		// The translucent pass requires special setup for the various modes.
 
 		// for special render styles brightmaps would not look good - especially for subtractive.
@@ -238,6 +248,24 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 	if (texture) state.SetMaterial(texture, UF_Sprite, (spritetype == RF_FACESPRITE) ? CTF_Expand : 0, clampmode, translation, OverrideShader);
 	else if (!modelframe) state.EnableTexture(false);
 
+	// Opaque sprites (normal style, binary alpha) can write depth, so TAA
+	// reprojects them like geometry and screen-space reflections (which run
+	// after this pass) find them. Translucent ones are drawn as before.
+	bool opaqueSprite = translucent && !modelframe && texture && !texture->GetTranslucency() &&
+		RenderStyle == LegacyRenderStyles[STYLE_Normal] && trans >= 1.f - FLT_EPSILON;
+	bool spriteDepth = opaqueSprite && (r_sprite_depth || (r_ssr > 0 && state.GetPassType() == GBUFFER_PASS));
+	if (spriteDepth) state.SetDepthMask(true);
+	state.SetFullbrightEmission(fullbright && !di->isFullbrightScene());
+	if (r_taa_reactive)
+	{
+		// Sprites have no motion vectors: moving ones and anything blended keep
+		// no TAA history. Blended draws can only mark a pixel fully (see main.fp);
+		// subtractive and fuzz styles can't mark it without corrupting the normals.
+		bool moving = actor && ((actor->Pos() - actor->Prev).LengthSquared() > 0.01 || !actor->Vel.isZero());
+		bool canMark = !translucent || RenderStyle.BlendOp == STYLEOP_Add;
+		state.SetReactive(!canMark ? 0.f : !opaqueSprite && !modelframe ? 1.f : moving ? 1.f : 0.f);
+	}
+
 	//SetColor(lightlevel, rel, Colormap, trans);
 
 	unsigned int iter = lightlist ? lightlist->Size() : 1;
@@ -247,6 +275,11 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 		clipping = true;
 		state.EnableSplit(true);
 	}
+
+	// +SOFTPARTICLE sprites (smoke, fog and steam cards) fade where they cut
+	// into the opaque scene instead of showing a hard intersection line.
+	bool soft = translucent && !modelframe && actor && (actor->renderflags2 & RF2_SOFTPARTICLE) && di->SceneDepthReady && r_softparticles;
+	if (soft) state.SetSoftFade(std::clamp(float(DVector2(x2 - x1, y2 - y1).Length()) * 0.25f, 4.f, 48.f));
 
 	secplane_t bottomp = { { 0, 0, -1. }, bottomclip, 1. };
 	secplane_t topp = { { 0, 0, -1. }, topclip, 1. };
@@ -324,18 +357,24 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 			}
 
 			FHWModelRenderer renderer(di, state, dynlightindex);
+			if (r_taa_reactive && actor && ((actor->Pos() - actor->Prev).LengthSquared() > 0.01 || !actor->Vel.isZero())) renderer.reactive = 1.f;
 			RenderModel(&renderer, x, y, z, modelframe, actor, Net_ModifyObjectFrac(actor, di->Viewpoint.TicFrac));
 			state.SetVertexBuffer(screen->mVertexData);
 		}
 	}
+	if (soft) state.SetSoftFade(0);
 
 	if (clipping)
 	{
 		state.EnableSplit(false);
 	}
+	if (spriteDepth) state.SetDepthMask(false);
+	state.SetReactive(0.f);
+	state.SetFullbrightEmission(false);
 
 	if (translucent)
 	{
+		state.SetGBufferMode(gbufferMode);
 		state.EnableBrightmap(true);
 		state.SetRenderStyle(STYLE_Translucent);
 		state.SetTextureMode(TM_NORMAL);

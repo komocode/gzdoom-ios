@@ -339,10 +339,13 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 			float uGISaturation;
 			float uSpecularStrength;
 			float uNormalStrength;
-			float uViewPadding0;
-			float uViewPadding1;
+			float uEmissiveStrength;
+			float uMipBias;
 			vec4 uGIOrigin;
 			vec4 uGISize;
+			vec4 uWeatherMap;
+			vec4 uWeatherParams;
+			vec4 uSceneDepthMap;
 		};
 
 		uniform int uTextureMode;
@@ -375,6 +378,10 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 
 		uniform vec4 uDetailParms;
 		uniform vec4 uMaterialParams;
+		uniform vec4 uMaterialParams2;
+		uniform vec4 uSurfaceParams;
+		uniform vec4 uParticleParams;
+		uniform vec4 uParticleParams2;
 		// Lighting + Fog
 		uniform vec4 uLightAttr;
 		#define uLightLevel uLightAttr.a
@@ -428,6 +435,8 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 		uniform sampler2D ShadowMap;
 		uniform sampler2DArray LightMap;
 		uniform sampler2DArray IrradianceVolume;
+		uniform sampler2DArray WeatherMap;
+		uniform sampler2D SceneLinearDepth;
 		uniform sampler2D texture2;
 		uniform sampler2D texture3;
 		uniform sampler2D texture4;
@@ -765,6 +774,10 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 	muSplitTopPlane.Init(hShader, "uSplitTopPlane");
 	muDetailParms.Init(hShader, "uDetailParms");
 	muMaterialParams.Init(hShader, "uMaterialParams");
+	muMaterialParams2.Init(hShader, "uMaterialParams2");
+	muSurfaceParams.Init(hShader, "uSurfaceParams");
+	muParticleParams.Init(hShader, "uParticleParams");
+	muParticleParams2.Init(hShader, "uParticleParams2");
 #ifdef NPOT_EMULATION
 	muNpotEmulation.Init(hShader, "uNpotEmulation");
 #endif
@@ -809,6 +822,15 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 
 	int lightmapindex = glGetUniformLocation(hShader, "LightMap");
 	if (lightmapindex != -1) glUniform1i(lightmapindex, 17);
+
+	// The modern-lighting textures are not provided by this backend. Give them
+	// units of their own so they don't alias the material textures' types.
+	static const char *const unboundSamplers[] = { "IrradianceVolume", "WeatherMap", "SceneLinearDepth" };
+	for (int i = 0; i < 3; i++)
+	{
+		tempindex = glGetUniformLocation(hShader, unboundSamplers[i]);
+		if (tempindex != -1) glUniform1i(tempindex, 18 + i);
+	}
 
 	glUseProgram(0);
 	return true;

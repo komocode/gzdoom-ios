@@ -358,6 +358,8 @@ void VkPPRenderPassSetup::CreateDescriptorLayout(const VkPPRenderPassKey& key)
 		builder.AddBinding(LIGHTLINES_BINDINGPOINT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 		builder.AddBinding(LIGHTLIST_BINDINGPOINT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	}
+	if (key.StorageBuffer)
+		builder.AddBinding(PP_STORAGE_BINDINGPOINT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	builder.DebugName("VkPPRenderPassSetup.DescriptorLayout");
 	DescriptorLayout = builder.Create(fb->device.get());
 }

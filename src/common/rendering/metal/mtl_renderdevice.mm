@@ -4,7 +4,12 @@
 **
 ** The device mirrors the Vulkan backend's structure (and shares its shaders and
 ** shader interface), so both stay interchangeable for the hardware renderer.
-** Command buffers are committed and waited for at the end of every frame.
+**
+** Each frame's command buffers are committed at Present without waiting, so
+** the CPU records the next frame while the GPU renders this one. Before a new
+** frame starts, the device waits until no more than r_framesinflight frames
+** are unfinished; that frame's per-frame buffers are then free to rewrite.
+** GPU timings are collected by the completion handlers.
 */
 
 #include "mtl_renderdevice.h"
@@ -44,6 +49,7 @@
 #endif
 
 EXTERN_CVAR(Bool, vk_raytrace)
+EXTERN_CVAR(Bool, vk_hdr)
 EXTERN_CVAR(Int, vid_maxfps)
 EXTERN_CVAR(Int, gl_multisample)
 EXTERN_CVAR(Int, gl_fxaa)
@@ -56,6 +62,14 @@ extern bool gpuStatActive;
 extern bool keepGpuStatActive;
 extern FString gpuStatOutput;
 extern bool AppActive;
+
+// 1 waits for the GPU at the end of every frame (the old behaviour, for
+// debugging). Above 2 it takes effect after a restart.
+CUSTOM_CVARD(Int, r_framesinflight, 2, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "Metal renderer: frames the CPU may record ahead of the GPU (1-3)")
+{
+	if (self < 1) self = 1;
+	else if (self > MTL_MAX_FRAMES_IN_FLIGHT) self = MTL_MAX_FRAMES_IN_FLIGHT;
+}
 
 extern "C" void *objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void *pool);
@@ -91,6 +105,8 @@ MetalRenderDevice::~MetalRenderDevice()
 	delete mSkyData;
 	delete mFXParticleVertices;
 	delete mFXParticleIndices;
+	delete mWeatherVertices;
+	delete mWeatherIndices;
 	delete mViewpoints;
 	delete mLights;
 	delete mBones;
@@ -149,7 +165,12 @@ void MetalRenderDevice::InitializeState()
 	if (mRaytracing)
 		mAlternateShaderManager.reset(new MtlShaderManager(this, false));
 
-	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight());
+	// The flat vertex buffer is large (static level geometry plus every frame's
+	// dynamic vertices), so it gets one copy per frame in flight only up to
+	// the startup setting, and at least 2 so that 1 and 2 can be switched live.
+	// The per-frame uniform buffers are ringed by MtlHardwareBuffer instead.
+	mPipelineNbr = std::clamp(std::max(int(r_framesinflight), 2), 1, HW_MAX_PIPELINE_BUFFERS);
+	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight(), mPipelineNbr);
 	mSkyData = new FSkyVertexBuffer;
 	mViewpoints = new HWViewpointBuffer;
 	mLights = new FLightBuffer();
@@ -193,11 +214,13 @@ void MetalRenderDevice::ApplyAutoQuality()
 	{
 		r_ssgi = 0;
 		r_volumetric = std::min(int(r_volumetric), 1);
+		r_volumetric_shadows = std::min(int(r_volumetric_shadows), 2);
 		gl_shadowmap_filter = mRaytracing ? 0 : 1;
 		gl_ssao = std::min(int(gl_ssao), 2);
 	}
 	if (reduction >= 2)
 	{
+		r_weather_quality = std::min(int(r_weather_quality), 1); // no distant rain layer
 		r_ssr = std::min(int(r_ssr), 1);
 		r_parallax = false;
 		gl_ssao = std::min(int(gl_ssao), 1);
@@ -217,10 +240,12 @@ void MetalRenderDevice::ApplyAutoQuality()
 	{
 		auto resolution = AppleGraphics::SelectResolution(s, GetClientWidth(), GetClientHeight(),
 			r_adaptive_quality ? mAutoQuality.scale : 1.f, r_adaptive_quality ? mAutoQuality.presentationScale : 1.f);
+		// Pixel art is stretched with nearest filtering, at an integer factor when close.
+		auto presentation = AppleGraphics::SelectPresentation(resolution.outputScale, r_pixelart);
 		vid_scalemode = 0;
-		vid_scalefactor = resolution.outputScale;
+		vid_scalefactor = presentation.outputScale;
 		r_upscale = resolution.sceneScale;
-		vid_scale_linear = true;
+		vid_scale_linear = presentation.linear;
 	}
 }
 
@@ -324,42 +349,173 @@ id<MTLBlitCommandEncoder> MetalRenderDevice::GetUploadEncoder()
 	return mUploadEncoder;
 }
 
+MtlFrameSync::Frame &MtlFrameSync::Get(uint64_t serial)
+{
+	Frame &frame = Frames[serial % (MTL_MAX_FRAMES_IN_FLIGHT + 2)];
+	if (frame.Serial != serial)
+		frame = { serial, 0, false, 0.0 };
+	return frame;
+}
+
+void MtlFrameSync::Advance()
+{
+	while (true)
+	{
+		const Frame &frame = Frames[(Completed + 1) % (MTL_MAX_FRAMES_IN_FLIGHT + 2)];
+		if (frame.Serial != Completed + 1 || !frame.Ended || frame.Pending > 0)
+			break;
+		Completed = frame.Serial;
+		LastGpuTime = frame.GpuTime;
+	}
+	Changed.notify_all();
+}
+
+void MetalRenderDevice::Commit(id<MTLCommandBuffer> commands)
+{
+	std::shared_ptr<MtlFrameSync> sync = mSync;
+	uint64_t serial = mFrameSerial;
+	{
+		std::lock_guard<std::mutex> lock(sync->Mutex);
+		sync->Get(serial).Pending++;
+		sync->Outstanding++;
+	}
+	[commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+		double gpuTime = buffer.GPUEndTime > buffer.GPUStartTime ? buffer.GPUEndTime - buffer.GPUStartTime : 0.0;
+		std::lock_guard<std::mutex> lock(sync->Mutex);
+		auto &frame = sync->Get(serial);
+		frame.Pending--;
+		frame.GpuTime += gpuTime;
+		sync->Outstanding--;
+		sync->Advance();
+	}];
+	[commands commit];
+}
+
 void MetalRenderDevice::FlushCommands(bool wait)
 {
 	if (mRenderState)
 		mRenderState->EndRenderPass();
 
-	id<MTLCommandBuffer> upload = nil, draw = nil;
+	// Uploads first: the draws may use what they upload.
 	if (mUploadCommands)
 	{
 		if (mUploadEncoder)
 			[mUploadEncoder endEncoding];
 		mUploadEncoder = nil;
-		[mUploadCommands commit];
-		upload = mUploadCommands;
+		Commit(mUploadCommands);
 		mUploadCommands = nil;
 	}
 	if (mDrawCommands)
 	{
-		[mDrawCommands commit];
-		draw = mDrawCommands;
+		Commit(mDrawCommands);
 		mDrawCommands = nil;
 	}
 	if (wait)
 	{
-		if (draw) [draw waitUntilCompleted];
-		if (upload) [upload waitUntilCompleted];
-		for (id<MTLCommandBuffer> cb : { upload, draw })
-		{
-			if (cb && cb.GPUEndTime > cb.GPUStartTime)
-				mFrameGpuTime += cb.GPUEndTime - cb.GPUStartTime;
-		}
+		std::unique_lock<std::mutex> lock(mSync->Mutex);
+		mSync->Changed.wait(lock, [&] { return mSync->Outstanding == 0; });
+		lock.unlock();
+		mDeferredReleases.clear();
 	}
 }
 
 void MetalRenderDevice::WaitForCommands(bool finish)
 {
 	FlushCommands(true);
+}
+
+bool MetalRenderDevice::GpuBusy()
+{
+	std::lock_guard<std::mutex> lock(mSync->Mutex);
+	return mSync->Outstanding > 0;
+}
+
+void MetalRenderDevice::WaitForFrame(uint64_t serial)
+{
+	std::unique_lock<std::mutex> lock(mSync->Mutex);
+	mSync->Changed.wait(lock, [&] { return mSync->Completed >= serial; });
+}
+
+void MetalRenderDevice::DeferRelease(id object)
+{
+	if (object)
+		mDeferredReleases.push_back({ object, mFrameSerial });
+}
+
+void MetalRenderDevice::BeginNextFrame()
+{
+	{
+		std::lock_guard<std::mutex> lock(mSync->Mutex);
+		mSync->Get(mFrameSerial).Ended = true;
+		mSync->Advance();
+	}
+
+	int frames = std::clamp(int(r_framesinflight), 1, mVertexData->mPipelineNbr);
+	if (frames != mFramesInFlight)
+	{
+		// Slots are assigned modulo the frame count: start from an idle GPU.
+		FlushCommands(true);
+		mFramesInFlight = frames;
+	}
+
+	mFrameSerial++;
+	if (mFrameSerial > (uint64_t)frames)
+		WaitForFrame(mFrameSerial - frames);
+	mFrameSlot = int(mFrameSerial % frames);
+
+	uint64_t completed;
+	{
+		std::lock_guard<std::mutex> lock(mSync->Mutex);
+		completed = mSync->Completed;
+		if (completed > mLastTimedFrame)
+		{
+			mLastTimedFrame = completed;
+			mGpuStatTime = mSync->LastGpuTime;
+		}
+	}
+	mDeferredReleases.erase(std::remove_if(mDeferredReleases.begin(), mDeferredReleases.end(),
+		[=](const DeferredRelease &item) { return item.Frame <= completed; }), mDeferredReleases.end());
+
+	// Everything the CPU writes from here on belongs to the new frame.
+	mBufferManager->SetFrameSlot(mFrameSlot);
+	mVertexData->NextPipelineBuffer();
+	mRenderState->SetVertexBuffer(mVertexData);
+}
+
+// HDR output (vk_hdr): an extended dynamic range swapchain whose 1.0 is SDR
+// white. The tone mapper extends highlights up to the display's current EDR
+// headroom; the HUD and menus stay at SDR white.
+void MetalRenderDevice::UpdateHdrOutput()
+{
+	bool want = vk_hdr;
+	float headroom = 1.f;
+#if TARGET_OS_TV
+	want = false;
+#elif TARGET_OS_IPHONE
+	if (@available(iOS 16.0, *))
+		headroom = (float)UIScreen.mainScreen.currentEDRHeadroom;
+	else
+		want = false;
+#else
+	NSScreen *display = NSApp.keyWindow.screen ? NSApp.keyWindow.screen : NSScreen.mainScreen;
+	headroom = display ? (float)display.maximumExtendedDynamicRangeColorComponentValue : 1.f;
+#endif
+	mHdrHeadroom = std::clamp(headroom, 1.f, 16.f);
+
+	if (want == mHdrActive || mDrawable)
+		return;
+	mHdrActive = want;
+	layer.pixelFormat = want ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+	CGColorSpaceRef colorspace = want ? CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB) : nullptr;
+	layer.colorspace = colorspace;
+	if (colorspace) CGColorSpaceRelease(colorspace);
+#if TARGET_OS_TV
+#elif TARGET_OS_IPHONE
+	if (@available(iOS 16.0, *))
+		layer.wantsExtendedDynamicRangeContent = want;
+#else
+	layer.wantsExtendedDynamicRangeContent = want;
+#endif
 }
 
 id<MTLTexture> MetalRenderDevice::GetDrawableTexture()
@@ -378,22 +534,26 @@ void MetalRenderDevice::Present()
 	if (size.width > 0 && size.height > 0 && !CGSizeEqualToSize(layer.drawableSize, size))
 		layer.drawableSize = size;
 
+	UpdateHdrOutput();
 	mPostprocess->DrawPresentTexture(mOutputLetterbox, true, false);
 	if (mDrawable)
 		[GetDrawCommands() presentDrawable:mDrawable];
 
-	FlushCommands(true);
+	FlushCommands(false);
 	mDrawable = nil;
 	// VSync controls tearing/presentation; it does not enforce our thermal or
-	// adaptive FPS cap. Submit and finish GPU work before the CPU limiter sleeps.
+	// adaptive FPS cap. Submit the GPU work before the CPU limiter sleeps.
 	FPSLimit();
+	uint64_t timedFrame = mLastTimedFrame;
+	BeginNextFrame();
+	// GPU time of the newest finished frame, once per frame (0 skips the sample).
+	double gpuMs = mLastTimedFrame != timedFrame ? mGpuStatTime * 1000 : 0;
 	double now = AutoQualityTime();
-	UpdateAutoQuality(mFrameGpuTime * 1000, mLastPresentTime > 0 ? now - mLastPresentTime : 0);
+	UpdateAutoQuality(gpuMs, mLastPresentTime > 0 ? now - mLastPresentTime : 0);
 	mLastPresentTime = now;
 
 	if (gpuStatActive)
-		gpuStatOutput.Format("Metal GPU frame=%04.2f ms\n", mFrameGpuTime * 1000.0);
-	mFrameGpuTime = 0.0;
+		gpuStatOutput.Format("Metal GPU frame=%04.2f ms, %d in flight\n", mGpuStatTime * 1000.0, mFramesInFlight);
 	gpuStatActive = keepGpuStatActive;
 	keepGpuStatActive = false;
 
@@ -439,7 +599,12 @@ bool MetalRenderDevice::CompileNextShader()
 	}
 	if (mAlternateShaderManager && !mAlternateShaderManager->CompileNextShader()) return false;
 	mShadersReady = true;
+	// Compile the active shaders' common pipelines while the startup screen is up;
+	// the alternate (traced or shadow-map) set follows in the background.
 	ApplyAutoQuality();
+	QueuePipelines(false);
+	mRenderState->FinishPrewarm();
+	QueuePipelines(true);
 	return true;
 }
 
@@ -657,6 +822,38 @@ void MetalRenderDevice::BeginFrame()
 	mScreenBuffers->BeginFrame(screen->mScreenViewport.width, screen->mScreenViewport.height, screen->mSceneViewport.width, screen->mSceneViewport.height);
 	mSaveBuffers->BeginFrame(SAVEPICWIDTH, SAVEPICHEIGHT, SAVEPICWIDTH, SAVEPICHEIGHT);
 	mRenderState->BeginFrame();
+
+	if (mShadersReady)
+	{
+		QueuePipelines(true);
+		// A couple at a time, so a pipeline needed right now never waits long for the compiler.
+		mRenderState->PumpPrewarm(2);
+	}
+}
+
+void MetalRenderDevice::QueuePipelines(bool both)
+{
+	// Again whenever the vertex layouts or the sample count change.
+	auto vertexFormat = [](IVertexBuffer *buffer) { return buffer ? static_cast<MtlHardwareVertexBuffer*>(buffer)->VertexFormat : -1; };
+	MtlRenderState::PrewarmFormats formats;
+	formats.flat = vertexFormat(mVertexData->GetBufferObjects().first);
+	formats.sky = vertexFormat(mSkyData->GetBufferObjects().first);
+	formats.particles = vertexFormat(mFXParticleVertices);
+	int samples = mScreenBuffers->GetBestSampleCount();
+	int signature[] = { formats.flat, formats.sky, formats.particles, samples };
+	if (!both)
+	{
+		mRenderState->QueueScenePipelines(mShaderManager.get(), formats, samples);
+		return;
+	}
+	if (memcmp(signature, mPrewarmSignature, sizeof(signature)) == 0)
+		return;
+	memcpy(mPrewarmSignature, signature, sizeof(signature));
+	for (auto shaders : { mShaderManager.get(), mAlternateShaderManager.get() })
+	{
+		if (shaders)
+			mRenderState->QueueScenePipelines(shaders, formats, samples);
+	}
 }
 
 void MetalRenderDevice::InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t> &LMTextureData)
@@ -671,6 +868,12 @@ void MetalRenderDevice::InitLightmap(int LMTextureSize, int LMTextureCount, TArr
 void MetalRenderDevice::InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t> &rgbaHalfData)
 {
 	mTextureManager->SetIrradianceVolume(width, height, layers, rgbaHalfData);
+}
+
+bool MetalRenderDevice::InitWeatherMap(int width, int height, TArray<uint16_t> &rgbaHalfData)
+{
+	mTextureManager->SetWeatherMap(width, height, rgbaHalfData);
+	return true;
 }
 
 void MetalRenderDevice::Draw2D()
@@ -700,6 +903,11 @@ FRenderState *MetalRenderDevice::RenderState()
 void MetalRenderDevice::AmbientOccludeScene(float m5)
 {
 	mPostprocess->AmbientOccludeScene(m5);
+}
+
+void MetalRenderDevice::ReflectScene(float m5)
+{
+	mPostprocess->ReflectScene(m5);
 }
 
 void MetalRenderDevice::SetLevelMesh(hwrenderer::LevelMesh *mesh)
@@ -737,7 +945,10 @@ MtlRaytrace::MtlRaytrace(MetalRenderDevice *fb) : fb(fb)
 		for (auto c : corners)
 			NullMesh->MeshVertices.Push({ c.X, c.Y, z ? 1.f : -1.f });
 	for (int i = 0; i < 12; i++)
+	{
 		NullMesh->MeshElements.Push(i);
+		NullMesh->ShadowElements.Push(i);
+	}
 }
 
 MtlRaytrace::~MtlRaytrace()
@@ -747,30 +958,33 @@ MtlRaytrace::~MtlRaytrace()
 
 void MtlRaytrace::SetLevelMesh(hwrenderer::LevelMesh *mesh)
 {
-	if (!mesh)
+	if (!mesh || mesh->ShadowElements.Size() < 3)
 		mesh = NullMesh;
-	if (mesh == Mesh && Built)
+	// Keyed on the generation, not the address: a new level's mesh can be
+	// allocated where the previous one was.
+	if (mesh->Generation == BuiltGeneration)
 		return;
-	Mesh = mesh;
-	Built = true;
+	BuiltGeneration = mesh->Generation;
+	// Frames in flight may still trace against the old level.
+	fb->DeferRelease(TopLevel);
+	fb->DeferRelease(BottomLevel);
 	TopLevel = nil;
 	BottomLevel = nil;
-	if (mesh && mesh->MeshElements.Size() >= 3)
-		Build(mesh);
+	Build(mesh);
 }
 
 void MtlRaytrace::Build(const hwrenderer::LevelMesh *mesh)
 {
 	id<MTLDevice> device = fb->device;
 	id<MTLBuffer> vertices = [device newBufferWithBytes:mesh->MeshVertices.Data() length:mesh->MeshVertices.Size() * sizeof(FVector3) options:MTLResourceStorageModeShared];
-	id<MTLBuffer> indices = [device newBufferWithBytes:mesh->MeshElements.Data() length:mesh->MeshElements.Size() * sizeof(uint32_t) options:MTLResourceStorageModeShared];
+	id<MTLBuffer> indices = [device newBufferWithBytes:mesh->ShadowElements.Data() length:mesh->ShadowElements.Size() * sizeof(uint32_t) options:MTLResourceStorageModeShared];
 
 	MTLAccelerationStructureTriangleGeometryDescriptor *geometry = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
 	geometry.vertexBuffer = vertices;
 	geometry.vertexStride = sizeof(FVector3);
 	geometry.indexBuffer = indices;
 	geometry.indexType = MTLIndexTypeUInt32;
-	geometry.triangleCount = mesh->MeshElements.Size() / 3;
+	geometry.triangleCount = mesh->ShadowElements.Size() / 3;
 	geometry.opaque = YES;
 
 	MTLPrimitiveAccelerationStructureDescriptor *primitive = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
@@ -797,7 +1011,8 @@ void MtlRaytrace::Build(const hwrenderer::LevelMesh *mesh)
 
 	id<MTLBuffer> scratch = [device newBufferWithLength:std::max(primitiveSizes.buildScratchBufferSize, instanceSizes.buildScratchBufferSize) options:MTLResourceStorageModePrivate];
 
-	// Built once per level, so a separate command buffer that is waited for is fine.
+	// Built once per level, and again (throttled) while sectors move, so a
+	// separate command buffer that is waited for is fine.
 	id<MTLCommandBuffer> commands = [fb->queue commandBuffer];
 	id<MTLAccelerationStructureCommandEncoder> encoder = [commands accelerationStructureCommandEncoder];
 	[encoder buildAccelerationStructure:BottomLevel descriptor:primitive scratchBuffer:scratch scratchBufferOffset:0];
@@ -830,7 +1045,7 @@ bool MetalRenderDevice::SupportsPlatformUpscaler()
 	return false;
 }
 
-bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset)
+bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *reactive, PPTexture *output, float jitterX, float jitterY, bool reset)
 {
 #ifdef HAVE_METALFX
 	if (@available(macOS 13.0, iOS 16.0, *))
@@ -840,9 +1055,16 @@ bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *dep
 		id<MTLTexture> depthTex = textures->GetTexture(PPTextureType::PPTexture, depth)->Texture;
 		id<MTLTexture> motionTex = textures->GetTexture(PPTextureType::PPTexture, motion)->Texture;
 		id<MTLTexture> outputTex = textures->GetTexture(PPTextureType::PPTexture, output)->Texture;
+		// The reactive mask (macOS 14.4 / iOS 17.4) keeps MetalFX from smearing
+		// sprites, particles and liquids, which have no motion vectors.
+		id<MTLTexture> reactiveTex = nil;
+		if (@available(macOS 14.4, iOS 17.4, *))
+		{
+			if (reactive) reactiveTex = textures->GetTexture(PPTextureType::PPTexture, reactive)->Texture;
+		}
 
 		id<MTLFXTemporalScaler> scaler = mTemporalScaler;
-		if (!scaler || scaler.inputWidth != colorTex.width || scaler.inputHeight != colorTex.height || scaler.outputWidth != outputTex.width || scaler.outputHeight != outputTex.height)
+		if (!scaler || scaler.inputWidth != colorTex.width || scaler.inputHeight != colorTex.height || scaler.outputWidth != outputTex.width || scaler.outputHeight != outputTex.height || mTemporalScalerReactive != (reactiveTex != nil))
 		{
 			MTLFXTemporalScalerDescriptor *desc = [MTLFXTemporalScalerDescriptor new];
 			desc.colorTextureFormat = colorTex.pixelFormat;
@@ -854,8 +1076,19 @@ bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *dep
 			desc.outputWidth = outputTex.width;
 			desc.outputHeight = outputTex.height;
 			desc.autoExposureEnabled = YES;	// the input is HDR, before tone mapping
+			// Its internal history may still be in use by frames in flight.
+			DeferRelease(mTemporalScaler);
+			if (@available(macOS 14.4, iOS 17.4, *))
+			{
+				if (reactiveTex)
+				{
+					desc.reactiveMaskTextureEnabled = YES;
+					desc.reactiveMaskTextureFormat = reactiveTex.pixelFormat;
+				}
+			}
 			scaler = [desc newTemporalScalerWithDevice:device];
 			mTemporalScaler = scaler;
+			mTemporalScalerReactive = reactiveTex != nil;
 			reset = true;
 			if (!scaler)
 			{
@@ -871,6 +1104,10 @@ bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *dep
 		scaler.depthTexture = depthTex;
 		scaler.motionTexture = motionTex;
 		scaler.outputTexture = outputTex;
+		if (@available(macOS 14.4, iOS 17.4, *))
+		{
+			if (reactiveTex) scaler.reactiveMaskTexture = reactiveTex;
+		}
 		scaler.inputContentWidth = colorTex.width;
 		scaler.inputContentHeight = colorTex.height;
 		scaler.jitterOffsetX = jitterX;

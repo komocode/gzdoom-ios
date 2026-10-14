@@ -29,6 +29,8 @@
 #include "hw_modernrender.h"
 
 #include "stats.h"
+#include "printf.h"
+#include <cmath>
 
 Postprocess hw_postprocess;
 
@@ -75,6 +77,8 @@ void PPBloom::UpdateTextures(int width, int height)
 
 void PPBloom::RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneHeight, int fixedcm)
 {
+	HasModernResult = false;
+
 	// Only bloom things if enabled and no special fixed light mode is active
 	if (!gl_bloom || fixedcm != CM_DEFAULT || gl_ssao_debug || sceneWidth <= 0 || sceneHeight <= 0)
 	{
@@ -437,7 +441,16 @@ FString PPFXAA::GetDefines()
 
 void PPCameraExposure::Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight)
 {
-	if (!gl_bloom)
+	// The classic bloom scales its threshold by the camera exposure; eye
+	// adaptation is independent of bloom and is applied by the tone mapper.
+	bool classic = gl_bloom && !r_bloom_modern;
+	bool adapt = r_autoexposure && sceneWidth > 0 && sceneHeight > 0;
+	if (!adapt)
+	{
+		AdaptValid = false;
+		FirstAdaptFrame = true;
+	}
+	if (!classic && !adapt)
 	{
 		return;
 	}
@@ -445,7 +458,93 @@ void PPCameraExposure::Render(PPRenderState *renderstate, int sceneWidth, int sc
 	renderstate->PushGroup("exposure");
 
 	UpdateTextures(sceneWidth, sceneHeight);
+	if (classic) RenderClassic(renderstate);
+	if (adapt) RenderAdaptation(renderstate);
 
+	renderstate->PopGroup();
+}
+
+float PPCameraExposure::ExposureScale() const
+{
+	return exp2f(clamp((float)r_exposure + ExposureBias, -8.f, 8.f));
+}
+
+bool PPCameraExposure::ExposureActive() const
+{
+	return AdaptValid || r_exposure != 0.f || ExposureBias != 0.f;
+}
+
+PPTexture *PPCameraExposure::AdaptedEV()
+{
+	if (AdaptValid)
+		return &AdaptTexture;
+	if (!ZeroTexture.Data)
+	{
+		std::shared_ptr<void> data(new float[1] { 0.f }, [](void *p) { delete[](float*)p; });
+		ZeroTexture = { 1, 1, PixelFormat::R32f, data };
+	}
+	return &ZeroTexture;
+}
+
+void PPCameraExposure::RenderAdaptation(PPRenderState *renderstate)
+{
+	ExposureExtractUniforms extractUniforms;
+	extractUniforms.Scale = screen->SceneScale();
+	extractUniforms.Offset = screen->SceneOffset();
+
+	// Log luminance of the scene, averaged down to one texel.
+	auto &level0 = ExposureLevels[0];
+	renderstate->Clear();
+	renderstate->Shader = &ExposureExtractLog;
+	renderstate->Uniforms.Set(extractUniforms);
+	renderstate->Viewport = level0.Viewport;
+	renderstate->SetInputCurrent(0, PPFilterMode::Linear);
+	renderstate->SetOutputTexture(&level0.Texture);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	for (size_t i = 0; i + 1 < ExposureLevels.size(); i++)
+	{
+		auto &blevel = ExposureLevels[i];
+		auto &next = ExposureLevels[i + 1];
+
+		renderstate->Shader = &ExposureAverage;
+		renderstate->Uniforms.Clear();
+		renderstate->Viewport = next.Viewport;
+		renderstate->SetInputTexture(0, &blevel.Texture, PPFilterMode::Linear);
+		renderstate->SetOutputTexture(&next.Texture);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	// Time-based adaptation toward the target EV.
+	uint64_t now = screen->FrameTime;
+	float dt = FirstAdaptFrame ? 0.f : clamp((now - LastAdaptTime) * 0.001f, 0.f, 0.25f);
+	ExposureAdaptUniforms adaptUniforms;
+	adaptUniforms.Key = max((float)r_autoexposure_key, 0.001f);
+	adaptUniforms.MinEV = min((float)r_autoexposure_min, (float)r_autoexposure_max);
+	adaptUniforms.MaxEV = max((float)r_autoexposure_min, (float)r_autoexposure_max);
+	adaptUniforms.Blend = FirstAdaptFrame ? 1.f : 1.f - expf(-dt * max((float)r_autoexposure_speed, 0.f));
+
+	renderstate->Clear();
+	renderstate->Shader = &ExposureAdapt;
+	renderstate->Uniforms.Set(adaptUniforms);
+	renderstate->Viewport = { 0, 0, 1, 1 };
+	renderstate->SetInputTexture(0, &ExposureLevels.back().Texture, PPFilterMode::Nearest);
+	renderstate->SetOutputTexture(&AdaptTexture);
+	if (FirstAdaptFrame)
+		renderstate->SetNoBlend();
+	else
+		renderstate->SetAlphaBlend();
+	renderstate->Draw();
+
+	FirstAdaptFrame = false;
+	AdaptValid = true;
+	LastAdaptTime = now;
+}
+
+void PPCameraExposure::RenderClassic(PPRenderState *renderstate)
+{
 	ExposureExtractUniforms extractUniforms;
 	extractUniforms.Scale = screen->SceneScale();
 	extractUniforms.Offset = screen->SceneOffset();
@@ -498,8 +597,6 @@ void PPCameraExposure::Render(PPRenderState *renderstate, int sceneWidth, int sc
 		renderstate->SetNoBlend();
 	renderstate->Draw();
 
-	renderstate->PopGroup();
-
 	FirstExposureFrame = false;
 }
 
@@ -534,6 +631,7 @@ void PPCameraExposure::UpdateTextures(int width, int height)
 	} while (width > 1 || height > 1);
 
 	FirstExposureFrame = true;
+	FirstAdaptFrame = true;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -604,13 +702,36 @@ void PPTonemap::UpdateTextures()
 	}
 }
 
+bool PPTonemap::IsPalette() const
+{
+	return level_tonemap == ETonemapMode::None && ETonemapMode((int)gl_tonemap) == ETonemapMode::Palette;
+}
+
+static float ACESCurve(float x)
+{
+	x *= 0.9f;
+	return (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
+}
+
 void PPTonemap::Render(PPRenderState *renderstate)
 {
 	ETonemapMode current_tonemap = (level_tonemap != ETonemapMode::None) ? level_tonemap : ETonemapMode((int)gl_tonemap);
 
+	// HDR resolve: the modern bloom, exposure and grading are applied here, in
+	// linear light, even when no tone mapping curve is selected.
+	PPTexture *bloomTexture = hw_postprocess.bloom.ModernResult();
+	hw_postprocess.bloom.ClearModernResult();
+	auto &grading = hw_postprocess.grading;
+	PalEntry shadowTint = (uint32_t)r_grade_shadowtint, highTint = (uint32_t)r_grade_hightint;
+	bool tint = (shadowTint.d & 0xffffff) != 0xffffff || (highTint.d & 0xffffff) != 0xffffff;
+	bool grade = r_grade_contrast != 1.f || r_grade_saturation != 1.f || tint || grading.Active();
+	bool exposure = hw_postprocess.exposure.ExposureActive();
+
 	if (current_tonemap == ETonemapMode::None)
 	{
-		return;
+		if (!bloomTexture && !grade && !exposure)
+			return;
+		current_tonemap = ETonemapMode::Linear;
 	}
 
 	UpdateTextures();
@@ -634,12 +755,207 @@ void PPTonemap::Render(PPRenderState *renderstate)
 	renderstate->Viewport = screen->mScreenViewport;
 	renderstate->SetInputCurrent(0);
 	if (current_tonemap == ETonemapMode::Palette)
+	{
 		renderstate->SetInputTexture(1, &PaletteTexture);
+	}
+	else
+	{
+		if (!BlackTexture.Data)
+		{
+			std::shared_ptr<void> data(new uint32_t[1] { 0 }, [](void *p) { delete[](uint32_t*)p; });
+			BlackTexture = { 1, 1, PixelFormat::Rgba8, data };
+		}
+
+		TonemapUniforms u = {};
+		u.BloomScale = screen->SceneScale();
+		u.BloomOffset = screen->SceneOffset();
+		u.ExposureScale = hw_postprocess.exposure.ExposureScale();
+		u.AutoExposure = hw_postprocess.exposure.AutoExposureWeight();
+		u.BloomIntensity = bloomTexture ? 0.2f * gl_bloom_amount : 0.f;
+		u.WhiteScale = 1.f / ACESCurve(clamp((float)r_tonemap_white, 0.25f, 64.f));
+		u.Contrast = clamp((float)r_grade_contrast, 0.25f, 4.f);
+		u.Saturation = clamp((float)r_grade_saturation, 0.f, 4.f);
+		u.TintAmount = tint ? 1.f : 0.f;
+		u.ShadowTint = { shadowTint.r / 255.f, shadowTint.g / 255.f, shadowTint.b / 255.f, 1.f };
+		u.HighTint = { highTint.r / 255.f, highTint.g / 255.f, highTint.b / 255.f, 1.f };
+		float size0 = 0.f, size1 = 0.f;
+		PPTexture *lut0 = nullptr, *lut1 = nullptr;
+		if (grading.Active())
+		{
+			lut0 = grading.GetLUT(grading.CurrentLUT(), size0);
+			lut1 = grading.GetLUT(grading.TargetLUT(), size1);
+		}
+		u.LutAmount = lut0 && lut1 ? 1.f : 0.f;
+		u.LutBlend = grading.CurrentLUT() != grading.TargetLUT() ? grading.Blend() : 0.f;
+		u.LutSize0 = size0;
+		u.LutSize1 = size1;
+		u.HdrPeak = screen->GetHdrHeadroom();
+		renderstate->Uniforms.Set(u);
+
+		renderstate->SetInputTexture(1, bloomTexture ? bloomTexture : &BlackTexture, PPFilterMode::Linear);
+		renderstate->SetInputTexture(2, hw_postprocess.exposure.AdaptedEV());
+		renderstate->SetInputTexture(3, lut0 ? lut0 : &BlackTexture, PPFilterMode::Linear);
+		renderstate->SetInputTexture(4, lut1 ? lut1 : &BlackTexture, PPFilterMode::Linear);
+	}
 	renderstate->SetOutputNext();
 	renderstate->SetNoBlend();
 	renderstate->Draw();
 
 	renderstate->PopGroup();
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+void PPGrading::SetLevel(const FString &levelName, const FString &lut, float exposureBias)
+{
+	LevelLUT = lut;
+	LevelEV = exposureBias;
+	if (levelName != LevelName)
+	{
+		// A new level starts with its own grade, without a fade or script overrides.
+		LevelName = levelName;
+		HasOverrideLUT = false;
+		HasOverrideEV = false;
+		Current = Target = LevelLUT.IsNotEmpty() ? LevelLUT : FString(r_grading_lut);
+		Fade = 0.f;
+		EVFrom = EVTo = LevelEV;
+		EVFade = 1.f;
+	}
+}
+
+void PPGrading::SetOverrideLUT(const FString &lut, float fadeSeconds)
+{
+	OverrideLUT = lut;
+	HasOverrideLUT = true;
+	LutFadeSeconds = max(fadeSeconds, 0.f);
+}
+
+void PPGrading::ClearOverrideLUT(float fadeSeconds)
+{
+	HasOverrideLUT = false;
+	LutFadeSeconds = max(fadeSeconds, 0.f);
+}
+
+void PPGrading::StartEVFade(float to, float seconds)
+{
+	EVFrom = EVFrom + (EVTo - EVFrom) * EVFade;
+	EVTo = to;
+	EVFade = seconds > 0.f ? 0.f : 1.f;
+	EVFadeSeconds = max(seconds, 0.001f);
+}
+
+void PPGrading::SetOverrideExposure(float ev, float fadeSeconds)
+{
+	HasOverrideEV = true;
+	StartEVFade(ev, fadeSeconds);
+}
+
+void PPGrading::ClearOverrideExposure(float fadeSeconds)
+{
+	HasOverrideEV = false;
+	StartEVFade(LevelEV, fadeSeconds);
+}
+
+float PPGrading::Update()
+{
+	uint64_t now = screen->FrameTime;
+	float dt = LastTime != 0 ? clamp((now - LastTime) * 0.001f, 0.f, 0.25f) : 0.f;
+	LastTime = now;
+
+	FString desired = HasOverrideLUT ? OverrideLUT : LevelLUT.IsNotEmpty() ? LevelLUT : FString(r_grading_lut);
+	if (desired.Compare(Target) != 0)
+	{
+		// Retargeting mid-fade continues from whichever LUT dominates.
+		if (Fade > 0.5f) Current = Target;
+		Target = desired;
+		Fade = 0.f;
+	}
+	if (Current.Compare(Target) != 0)
+	{
+		Fade += LutFadeSeconds > 0.f ? dt / LutFadeSeconds : 1.f;
+		if (Fade >= 1.f)
+		{
+			Current = Target;
+			Fade = 0.f;
+			LutFadeSeconds = 0.5f;
+		}
+	}
+
+	if (!HasOverrideEV && EVTo != LevelEV) StartEVFade(LevelEV, 0.5f);
+	EVFade = min(EVFade + dt / EVFadeSeconds, 1.f);
+	return EVFrom + (EVTo - EVFrom) * EVFade;
+}
+
+PPTexture *PPGrading::GetLUT(const FString &name, float &size)
+{
+	if (name.IsEmpty())
+	{
+		// Identity 32x32x32 strip, the neutral end of a fade.
+		const int n = 32;
+		if (!Identity)
+		{
+			std::shared_ptr<void> data(new uint32_t[n * n * n], [](void *p) { delete[](uint32_t*)p; });
+			uint8_t *pixels = (uint8_t *)data.get();
+			for (int y = 0; y < n; y++)
+			{
+				for (int x = 0; x < n * n; x++)
+				{
+					uint8_t *p = pixels + (y * n * n + x) * 4;
+					p[0] = (uint8_t)((x % n) * 255 / (n - 1));
+					p[1] = (uint8_t)(y * 255 / (n - 1));
+					p[2] = (uint8_t)((x / n) * 255 / (n - 1));
+					p[3] = 255;
+				}
+			}
+			Identity = std::make_unique<PPTexture>(n * n, n, PixelFormat::Rgba8, data);
+		}
+		size = (float)n;
+		return Identity.get();
+	}
+
+	auto it = Textures.find(name);
+	if (it == Textures.end())
+	{
+		std::unique_ptr<PPTexture> pptex;
+		int lutSize = 0;
+		auto gtex = TexMan.GetGameTexture(TexMan.CheckForTexture(name.GetChars(), ETextureType::Any, FTextureManager::TEXMAN_TryAny | FTextureManager::TEXMAN_ShortNameOnly), true);
+		if (!gtex || !gtex->isValid())
+			gtex = TexMan.GetGameTexture(TexMan.CheckForTexture(name.GetChars(), ETextureType::Any, FTextureManager::TEXMAN_TryAny), true);
+		if (gtex && gtex->isValid())
+		{
+			auto buffer = gtex->GetTexture()->CreateTexBuffer(0);
+			if (buffer.mHeight > 1 && buffer.mWidth == buffer.mHeight * buffer.mHeight)
+			{
+				std::shared_ptr<void> data(new uint32_t[buffer.mWidth * buffer.mHeight], [](void *p) { delete[](uint32_t*)p; });
+				int count = buffer.mWidth * buffer.mHeight;
+				uint8_t *pixels = (uint8_t *)data.get();
+				for (int i = 0; i < count; i++)
+				{
+					int pos = i << 2;
+					pixels[pos] = buffer.mBuffer[pos + 2];
+					pixels[pos + 1] = buffer.mBuffer[pos + 1];
+					pixels[pos + 2] = buffer.mBuffer[pos];
+					pixels[pos + 3] = 255;
+				}
+				pptex = std::make_unique<PPTexture>(buffer.mWidth, buffer.mHeight, PixelFormat::Rgba8, data);
+				lutSize = buffer.mHeight;
+			}
+			else
+			{
+				Printf("Grading LUT '%s' must be a strip of N slices of NxN (for example 1024x32)\n", name.GetChars());
+			}
+		}
+		else
+		{
+			Printf("Grading LUT '%s' not found\n", name.GetChars());
+		}
+		Sizes[name] = lutSize;
+		it = Textures.emplace(name, std::move(pptex)).first;
+	}
+	if (!it->second)
+		return GetLUT(FString(), size);
+	size = (float)Sizes[name];
+	return it->second.get();
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -727,7 +1043,8 @@ void PPAmbientOcclusion::UpdateTextures(int width, int height)
 
 bool PPAmbientOcclusion::GBufferNeeded()
 {
-	return gl_ssao != 0 || hw_postprocess.sceneEffects.Active();
+	// TAA reads its reactive mask from the normal G-buffer's alpha.
+	return gl_ssao != 0 || hw_postprocess.sceneEffects.Active() || (r_taa_reactive && hw_postprocess.taa.Enabled());
 }
 
 void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight)
@@ -736,6 +1053,17 @@ void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneW
 	{
 		return;
 	}
+
+	if (gl_ssao == 0 && !hw_postprocess.sceneEffects.Active() && !r_softparticles)
+	{
+		return; // the G-buffer is only there for the TAA reactive mask
+	}
+	// Soft particles need the linear depth below even without SSAO.
+
+	// The half-resolution buffers follow the 3D viewport, which is smaller
+	// than the scene buffers while upscaling, so their cost scales with it.
+	sceneWidth = max(screen->mSceneViewport.width, 1);
+	sceneHeight = max(screen->mSceneViewport.height, 1);
 
 	CreateShaders();
 	UpdateTextures(sceneWidth, sceneHeight);
@@ -810,7 +1138,7 @@ void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneW
 	renderstate->SetNoBlend();
 	renderstate->Draw();
 
-	// Reflections and light scattering read the opaque scene before AO darkens it.
+	// Indirect light and light scattering read the opaque scene before AO darkens it.
 	hw_postprocess.sceneEffects.Render(renderstate, m5, sceneWidth, sceneHeight, &LinearDepthTexture, AmbientWidth, AmbientHeight);
 
 	if (gl_ssao == 0)
@@ -1148,12 +1476,18 @@ void PPCustomShaderInstance::AddUniformField(size_t &offset, const FString &name
 }
 
 
-void Postprocess::Pass1(PPRenderState* state, int fixedcm, int sceneWidth, int sceneHeight)
+void Postprocess::Pass1(PPRenderState* state, int fixedcm, int sceneWidth, int sceneHeight, const std::function<void()> &drawWeapon)
 {
+	exposure.SetExposureBias(grading.Update());
 	taa.Render(state, sceneWidth, sceneHeight);
+	// The weapon is drawn after TAA (so it doesn't smear) but before exposure
+	// and bloom, so its emissive parts bloom and it is graded like the scene.
+	bool weaponFirst = r_weapon_prebloom;
+	if (weaponFirst && drawWeapon) drawWeapon();
 	exposure.Render(state, sceneWidth, sceneHeight);
 	customShaders.Run(state, "beforebloom");
 	bloom.RenderBloom(state, sceneWidth, sceneHeight, fixedcm);
+	if (!weaponFirst && drawWeapon) drawWeapon();
 }
 
 void Postprocess::Pass2(PPRenderState* state, int fixedcm, float flash, int sceneWidth, int sceneHeight)
@@ -1183,15 +1517,18 @@ void PPBloom::RenderModernBloom(PPRenderState *renderstate, int sceneWidth, int 
 	down.Scale = screen->SceneScale();
 	down.Offset = screen->SceneOffset();
 	down.InvSize = { 1.0f / sceneWidth, 1.0f / sceneHeight };
-	down.Threshold = 1.0f;
-	down.Knee = 0.5f;
+	down.Threshold = max((float)r_bloom_threshold, 0.f);
+	down.Knee = max((float)r_bloom_knee, 0.01f);
+	down.ExposureScale = hw_postprocess.exposure.ExposureScale();
+	down.AutoExposure = hw_postprocess.exposure.AutoExposureWeight();
+	down.Padding0 = down.Padding1 = 0.0f;
 
 	renderstate->Clear();
 	renderstate->Shader = &BloomPrefilter;
 	renderstate->Uniforms.Set(down);
 	renderstate->Viewport = levels[0].Viewport;
 	renderstate->SetInputCurrent(0, PPFilterMode::Linear);
-	renderstate->SetInputTexture(1, &hw_postprocess.exposure.CameraTexture);
+	renderstate->SetInputTexture(1, hw_postprocess.exposure.AdaptedEV());
 	renderstate->SetOutputTexture(&levels[0].VTexture);
 	renderstate->SetNoBlend();
 	renderstate->Draw();
@@ -1229,6 +1566,15 @@ void PPBloom::RenderModernBloom(PPRenderState *renderstate, int sceneWidth, int 
 		renderstate->Draw();
 	}
 
+	// The tone mapper adds the bloom in linear light. The palette tone mapper
+	// can't, so there it is added to the gamma-encoded scene as before.
+	if (!hw_postprocess.tonemap.IsPalette())
+	{
+		HasModernResult = true;
+		renderstate->PopGroup();
+		return;
+	}
+
 	up.InvSize = { 1.0f / levels[0].Viewport.width, 1.0f / levels[0].Viewport.height };
 	up.Intensity = 0.12f * gl_bloom_amount;
 	renderstate->Clear();
@@ -1247,15 +1593,33 @@ void PPBloom::RenderModernBloom(PPRenderState *renderstate, int sceneWidth, int 
 
 bool PPSceneEffects::Active() const
 {
-	return r_ssr > 0 || r_ssgi > 0 || (r_volumetric > 0 && Volumetric.LightCount > 0);
+	return r_ssr > 0 || r_ssgi > 0 || VolumetricActive();
+}
+
+bool PPSceneEffects::VolumetricActive() const
+{
+	return r_volumetric > 0 && (VolumetricLightCount > 0 || Fog.Density > 0.0f);
 }
 
 void PPSceneEffects::SetVolumetricLights(const FVector4 *lights, int count)
 {
 	count = clamp(count, 0, (int)MaxVolumetricLights);
-	Volumetric.LightCount = count;
-	for (int i = 0; i < count * 2; i++)
-		Volumetric.Lights[i] = lights[i];
+	VolumetricLightCount = count;
+	for (int i = 0; i < count * VolumetricLightVec4s; i++)
+		VolumetricLights[i] = lights[i];
+}
+
+void PPSceneEffects::SetVolumetricView(const float *viewMatrix)
+{
+	VSMatrix view, inverse;
+	view.loadMatrix(viewMatrix);
+	if (!view.inverseMatrix(inverse))
+		return;
+	const FLOATTYPE *m = inverse.get();
+	// The pass works with view space z pointing forward, hence the negated z axis.
+	ViewToWorld[0] = { (float)m[0], (float)m[1], (float)m[2], (float)m[12] };
+	ViewToWorld[1] = { (float)m[4], (float)m[5], (float)m[6], (float)m[13] };
+	ViewToWorld[2] = { -(float)m[8], -(float)m[9], -(float)m[10], (float)m[14] };
 }
 
 void PPSceneEffects::UpdateTextures(int width, int height)
@@ -1264,17 +1628,146 @@ void PPSceneEffects::UpdateTextures(int width, int height)
 		return;
 	Width = width;
 	Height = height;
-	Reflections = { width, height, PixelFormat::Rgba16f };
-	Volumetrics = { width, height, PixelFormat::Rgba16f };
 	Indirect = { width, height, PixelFormat::Rgba16f };
+}
+
+void PPSceneEffects::CreateScatterShaders()
+{
+	if (ScatterShadersCreated)
+		return;
+	static const char *defines[NumScatterVariants] = { "", "#define FULL_RESOLUTION\n", "#define FULL_RESOLUTION\n#define MULTISAMPLE\n" };
+	for (int i = 0; i < NumScatterVariants; i++)
+	{
+		Scatter[i] = { "shaders/pp/volumetric.fp", defines[i], VolumetricUniforms::Desc() };
+		Scatter[NumScatterVariants + i] = { "shaders/pp/volumetric.fp", FString(defines[i]) + "#define USE_RAYTRACE\n", VolumetricUniforms::Desc() };
+		Scatter[NumScatterVariants + i].RayQuery = true;
+	}
+	ScatterShadersCreated = true;
+}
+
+void PPSceneEffects::RenderVolumetrics(PPRenderState *renderstate, const FVector2 &uvToViewA, const FVector2 &uvToViewB, PPTexture *linearDepth)
+{
+	// The light list is a storage buffer, which the OpenGL backends do not bind.
+	if (!renderstate->SupportsStorageData())
+		return;
+
+	CreateScatterShaders();
+
+	// r_volumetric 2 marches every pixel of the 3D viewport, 1 every fourth.
+	// Either way the buffer follows the 3D viewport, which is smaller than
+	// the scene buffers while upscaling.
+	bool full = r_volumetric > 1;
+	const IntRect &sceneViewport = screen->mSceneViewport;
+	int width = full ? sceneViewport.width : (sceneViewport.width + 1) / 2;
+	int height = full ? sceneViewport.height : (sceneViewport.height + 1) / 2;
+	if (width <= 0 || height <= 0)
+		return;
+	if (width != VolumetricWidth || height != VolumetricHeight)
+	{
+		VolumetricWidth = width;
+		VolumetricHeight = height;
+		Volumetrics = { width, height, PixelFormat::Rgba16f };
+		VolumetricsBlur = { width, height, PixelFormat::Rgba16f };
+	}
+
+	LastRayQuery = renderstate->SupportsRayQuery();
+	bool rayQuery = false;
+	for (int i = 0; i < VolumetricLightCount && LastRayQuery; i++)
+		rayQuery |= VolumetricLights[i * VolumetricLightVec4s + 3].W > 0.0f;
+
+	VolumetricUniforms u = {};
+	u.ViewX = ViewToWorld[0];
+	u.ViewY = ViewToWorld[1];
+	u.ViewZ = ViewToWorld[2];
+	u.UVToViewA = uvToViewA;
+	u.UVToViewB = uvToViewB;
+	u.Scale = screen->SceneScale();
+	u.Offset = screen->SceneOffset();
+	u.FogColor = { Fog.Color.X, Fog.Color.Y, Fog.Color.Z, clamp(Fog.Noise, 0.0f, 1.0f) };
+	u.FogParams = { Fog.Base, 1.0f / max(Fog.Falloff, 1.0f), max(Fog.Density, 0.0f), max(Fog.SectorDensity, 0.0f) };
+	u.FogNoise = { Fog.NoiseOffset.X, Fog.NoiseOffset.Y, Fog.NoiseOffset.Z, Fog.NoiseScale };
+	u.LinearizeDepthA = 1.0f / screen->GetZFar() - 1.0f / screen->GetZNear();
+	u.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
+	u.InverseDepthRangeA = 1.0f;
+	u.InverseDepthRangeB = 0.0f;
+	u.Strength = r_volumetric_strength;
+	u.FogScatter = max((float)r_volumetric_fogscatter, 0.0f);
+	u.MaxDistance = 16384.0f;
+	// A new sample offset every frame for TAA to integrate; fixed without it.
+	u.JitterOffset = r_taa ? (FrameIndex++ & 63) * 0.618034f : 0.0f;
+	u.LightCount = VolumetricLightCount;
+	u.Samples = clamp((int)r_volumetric_samples, 2, 64);
+	if (full) u.Samples = max(u.Samples * 2 / 3, 2);
+	u.SampleIndex = 0;
+
+	int variant = !full ? ScatterHalf : gl_multisample > 1 ? ScatterFullMS : ScatterFull;
+	if (rayQuery) variant += NumScatterVariants;
+
+	IntRect viewport;
+	viewport.left = 0;
+	viewport.top = 0;
+	viewport.width = width;
+	viewport.height = height;
+
+	renderstate->Clear();
+	renderstate->Shader = &Scatter[variant];
+	renderstate->Uniforms.Set(u);
+	renderstate->Viewport = viewport;
+	if (full)
+	{
+		renderstate->SetInputSceneDepth(0);
+		renderstate->SetInputSceneColor(2);
+	}
+	else
+	{
+		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
+	}
+	renderstate->SetInputSpecialType(1, PPTextureType::ShadowMap, PPFilterMode::Nearest);
+	// The buffer is never empty: the shader declares at least one light.
+	renderstate->SetStorageData(VolumetricLights, max(VolumetricLightCount, 1) * VolumetricLightVec4s * (int)sizeof(FVector4));
+	renderstate->SetRayQuery(rayQuery);
+	renderstate->SetOutputTexture(&Volumetrics);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	// Depth-aware blur hides the per-pixel sample jitter (and, at half
+	// resolution, softens the upsample).
+	VolumetricBlurUniforms blur;
+	blur.InvSize = { 1.0f / width, 1.0f / height };
+	blur.DepthSharpness = 8.0f;
+	blur.Padding = 0.0f;
+	renderstate->Clear();
+	renderstate->Shader = &ScatterBlur;
+	renderstate->Uniforms.Set(blur);
+	renderstate->Viewport = viewport;
+	renderstate->SetInputTexture(0, &Volumetrics, PPFilterMode::Nearest);
+	renderstate->SetInputTexture(1, linearDepth, PPFilterMode::Nearest);
+	renderstate->SetOutputTexture(&VolumetricsBlur);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	// Premultiplied: in-scattered light plus height fog over the scene.
+	CompositeUniforms composite;
+	composite.Scale = { 1.0f, 1.0f };
+	composite.Offset = { 0.0f, 0.0f };
+	renderstate->Clear();
+	renderstate->Shader = &Composite;
+	renderstate->Uniforms.Set(composite);
+	renderstate->Viewport = sceneViewport;
+	renderstate->SetInputTexture(0, &VolumetricsBlur, PPFilterMode::Linear);
+	renderstate->SetOutputSceneColor();
+	renderstate->BlendMode.BlendOp = STYLEOP_Add;
+	renderstate->BlendMode.SrcAlpha = STYLEALPHA_One;
+	renderstate->BlendMode.DestAlpha = STYLEALPHA_InvSrc;
+	renderstate->BlendMode.Flags = 0;
+	renderstate->Draw();
 }
 
 void PPSceneEffects::Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight, PPTexture *linearDepth, int depthWidth, int depthHeight)
 {
-	bool reflections = r_ssr > 0;
-	bool volumetrics = r_volumetric > 0 && Volumetric.LightCount > 0;
+	bool volumetrics = VolumetricActive();
 	bool indirect = r_ssgi > 0;
-	if (!reflections && !volumetrics && !indirect)
+	if (!volumetrics && !indirect)
 		return;
 
 	// Effects render at the SSAO resolution (half size) and are upscaled when composited.
@@ -1297,34 +1790,6 @@ void PPSceneEffects::Render(PPRenderState *renderstate, float m5, int sceneWidth
 	composite.Offset = { 0.0f, 0.0f };
 
 	renderstate->PushGroup("sceneeffects");
-
-	if (reflections)
-	{
-		ReflectionUniforms u;
-		u.UVToViewA = uvToViewA;
-		u.UVToViewB = uvToViewB;
-		u.Scale = screen->SceneScale();
-		u.Offset = screen->SceneOffset();
-		u.InvSize = { 1.0f / depthWidth, 1.0f / depthHeight };
-		u.Strength = r_ssr_strength;
-		u.MaxDistance = 1024.0f;
-		u.Thickness = 24.0f;
-		u.Steps = r_ssr > 1 ? 40 : 24;
-		u.SampleIndex = 0;
-		u.Padding = 0.0f;
-
-		renderstate->Clear();
-		renderstate->Shader = gl_multisample > 1 ? &ReflectMS : &Reflect;
-		renderstate->Uniforms.Set(u);
-		renderstate->Viewport = viewport;
-		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
-		renderstate->SetInputSceneNormal(1);
-		renderstate->SetInputSceneFog(2);
-		renderstate->SetInputSceneColor(3);
-		renderstate->SetOutputTexture(&Reflections);
-		renderstate->SetNoBlend();
-		renderstate->Draw();
-	}
 
 	if (indirect)
 	{
@@ -1354,33 +1819,6 @@ void PPSceneEffects::Render(PPRenderState *renderstate, float m5, int sceneWidth
 		renderstate->Draw();
 	}
 
-	if (volumetrics)
-	{
-		Volumetric.UVToViewA = uvToViewA;
-		Volumetric.UVToViewB = uvToViewB;
-		Volumetric.Strength = r_volumetric_strength;
-		renderstate->Clear();
-		renderstate->Shader = &Scatter;
-		renderstate->Uniforms.Set(Volumetric);
-		renderstate->Viewport = viewport;
-		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
-		renderstate->SetOutputTexture(&Volumetrics);
-		renderstate->SetNoBlend();
-		renderstate->Draw();
-	}
-
-	if (reflections)
-	{
-		renderstate->Clear();
-		renderstate->Shader = &Composite;
-		renderstate->Uniforms.Set(composite);
-		renderstate->Viewport = screen->mSceneViewport;
-		renderstate->SetInputTexture(0, &Reflections, PPFilterMode::Linear);
-		renderstate->SetOutputSceneColor();
-		renderstate->SetAlphaBlend();
-		renderstate->Draw();
-	}
-
 	if (indirect)
 	{
 		renderstate->Clear();
@@ -1394,16 +1832,148 @@ void PPSceneEffects::Render(PPRenderState *renderstate, float m5, int sceneWidth
 	}
 
 	if (volumetrics)
+		RenderVolumetrics(renderstate, uvToViewA, uvToViewB, linearDepth);
+
+	renderstate->PopGroup();
+}
+
+void PPSceneEffects::UpdateReflectionTextures(int width, int height)
+{
+	if (width == ReflectWidth && height == ReflectHeight)
+		return;
+	ReflectWidth = width;
+	ReflectHeight = height;
+	TraceDepth = { width, height, PixelFormat::R32f };
+	Reflections = { width, height, PixelFormat::Rgba16f };
+	for (int i = 0; i < NumReflectionLevels; i++)
+		ReflectLevels[i] = { max(width >> i, 1), max(height >> i, 1), PixelFormat::Rgba16f };
+}
+
+void PPSceneEffects::RenderReflections(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight)
+{
+	if (r_ssr <= 0 || sceneWidth <= 0 || sceneHeight <= 0)
+		return;
+
+	// Half the size of the 3D viewport (smaller than the scene buffers while upscaling).
+	int viewWidth = max(screen->mSceneViewport.width, 1);
+	int viewHeight = max(screen->mSceneViewport.height, 1);
+	int width = (viewWidth + 1) / 2;
+	int height = (viewHeight + 1) / 2;
+	UpdateReflectionTextures(width, height);
+
+	float tanHalfFovy = 1.0f / m5;
+	float invFocalLenX = tanHalfFovy * (viewWidth / (float)viewHeight);
+	float invFocalLenY = tanHalfFovy;
+	bool multisample = gl_multisample > 1;
+	auto sceneScale = screen->SceneScale();
+	auto sceneOffset = screen->SceneOffset();
+
+	IntRect viewport = { 0, 0, width, height };
+
+	renderstate->PushGroup("reflections");
+
+	// Linear depth of the finished scene, including the sprites that write depth.
+	LinearDepthUniforms linearUniforms = {};
+	linearUniforms.SampleIndex = 0;
+	linearUniforms.LinearizeDepthA = 1.0f / screen->GetZFar() - 1.0f / screen->GetZNear();
+	linearUniforms.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
+	linearUniforms.InverseDepthRangeA = 1.0f;
+	linearUniforms.InverseDepthRangeB = 0.0f;
+	linearUniforms.Scale = sceneScale;
+	linearUniforms.Offset = sceneOffset;
+
+	renderstate->Clear();
+	renderstate->Shader = multisample ? &TraceLinearDepthMS : &TraceLinearDepth;
+	renderstate->Uniforms.Set(linearUniforms);
+	renderstate->Viewport = viewport;
+	renderstate->SetInputSceneDepth(0);
+	renderstate->SetInputSceneColor(1);
+	renderstate->SetOutputTexture(&TraceDepth);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	// Blur chain of the scene colour; rough surfaces sample coarser levels.
+	SSRDownUniforms down = {};
+	down.Scale = sceneScale;
+	down.Offset = sceneOffset;
+	down.InvSize = { 1.0f / screen->mScreenViewport.width, 1.0f / screen->mScreenViewport.height };
+	down.SampleIndex = 0;
+	renderstate->Clear();
+	renderstate->Shader = multisample ? &ReflectDownSceneMS : &ReflectDownScene;
+	renderstate->Uniforms.Set(down);
+	renderstate->Viewport = viewport;
+	renderstate->SetInputSceneColor(0, PPFilterMode::Linear);
+	renderstate->SetOutputTexture(&ReflectLevels[0]);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	for (int i = 1; i < NumReflectionLevels; i++)
 	{
+		auto &src = ReflectLevels[i - 1];
+		auto &dst = ReflectLevels[i];
+		down.Scale = { 1.0f, 1.0f };
+		down.Offset = { 0.0f, 0.0f };
+		down.InvSize = { 1.0f / src.Width, 1.0f / src.Height };
 		renderstate->Clear();
-		renderstate->Shader = &Composite;
-		renderstate->Uniforms.Set(composite);
-		renderstate->Viewport = screen->mSceneViewport;
-		renderstate->SetInputTexture(0, &Volumetrics, PPFilterMode::Linear);
-		renderstate->SetOutputSceneColor();
-		renderstate->SetAdditiveBlend();
+		renderstate->Shader = &ReflectDown;
+		renderstate->Uniforms.Set(down);
+		renderstate->Viewport = { 0, 0, dst.Width, dst.Height };
+		renderstate->SetInputTexture(0, &src, PPFilterMode::Linear);
+		renderstate->SetOutputTexture(&dst);
+		renderstate->SetNoBlend();
 		renderstate->Draw();
 	}
+
+	// While TAA accumulates, the ray jitter changes every frame so rough
+	// reflections converge instead of showing a fixed noise pattern.
+	ReflectFrame = ReflectFrame % 64 + 1;
+
+	SSRUniforms u = {};
+	u.UVToViewA = { 2.0f * invFocalLenX, 2.0f * invFocalLenY };
+	u.UVToViewB = { -invFocalLenX, -invFocalLenY };
+	u.Scale = sceneScale;
+	u.Offset = sceneOffset;
+	u.InvSize = { 1.0f / width, 1.0f / height };
+	u.Strength = r_ssr_strength;
+	u.MaxDistance = r_ssr > 1 ? 1536.0f : 1024.0f;
+	u.Thickness = 24.0f;
+	u.Steps = r_ssr > 1 ? 40 : 24;
+	u.SampleIndex = 0;
+	u.Stretch = clamp((float)r_ssr_stretch, 0.0f, 8.0f);
+	u.Jitter = hw_postprocess.taa.Enabled() ? (float)ReflectFrame : 0.0f;
+	u.FarDepth = screen->GetZFar();
+	u.LevelHeight = (float)height;
+
+	renderstate->Clear();
+	renderstate->Shader = multisample ? &ReflectMS : &Reflect;
+	renderstate->Uniforms.Set(u);
+	renderstate->Viewport = viewport;
+	renderstate->SetInputTexture(0, &TraceDepth, PPFilterMode::Nearest);
+	renderstate->SetInputSceneNormal(1);
+	renderstate->SetInputSceneFog(2);
+	renderstate->SetInputSceneColor(3, PPFilterMode::Linear);
+	for (int i = 0; i < NumReflectionLevels; i++)
+		renderstate->SetInputTexture(4 + i, &ReflectLevels[i], PPFilterMode::Linear);
+	renderstate->SetOutputTexture(&Reflections);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	// Full-resolution composite: the reflectivity in the G-buffer gives crisp
+	// puddle edges, and translucent surfaces drawn on top are left alone.
+	SSRCompositeUniforms composite = {};
+	composite.Scale = sceneScale;
+	composite.Offset = sceneOffset;
+	composite.SampleIndex = 0;
+	composite.Strength = r_ssr_strength;
+	renderstate->Clear();
+	renderstate->Shader = multisample ? &ReflectCompositeMS : &ReflectComposite;
+	renderstate->Uniforms.Set(composite);
+	renderstate->Viewport = screen->mSceneViewport;
+	renderstate->SetInputTexture(0, &Reflections, PPFilterMode::Linear);
+	renderstate->SetInputSceneFog(1);
+	renderstate->SetOutputSceneColor();
+	renderstate->SetAlphaBlend();
+	renderstate->Draw();
 
 	renderstate->PopGroup();
 }
@@ -1422,7 +1992,7 @@ void PPFinish::Render(PPRenderState *renderstate)
 	u.Grain = clamp((float)r_grain, 0.0f, 1.0f);
 	u.Time = (float)((screen->FrameTime % 100000) * 0.001);
 	u.Aspect = screen->mScreenViewport.width / (float)max(screen->mScreenViewport.height, 1);
-	u.Padding = 0.0f;
+	u.MaxValue = sqrtf(screen->GetHdrHeadroom());
 
 	renderstate->PushGroup("finish");
 	renderstate->Clear();
@@ -1454,6 +2024,11 @@ bool PPTemporalAA::Enabled() const
 {
 	// MSAA already resolves edges and its depth can't be sampled here.
 	return r_taa && gl_multisample <= 1;
+}
+
+bool PPTemporalAA::ReactiveMask() const
+{
+	return Enabled() && r_taa_reactive;
 }
 
 IntRect PPTemporalAA::BeginUpscale(const IntRect &sceneViewport)
@@ -1535,6 +2110,7 @@ bool PPTemporalAA::PlatformUpscale(PPRenderState *renderstate, const TemporalUni
 		UpscaleColor = { inputWidth, inputHeight, PixelFormat::Rgba16f };
 		UpscaleDepth = { inputWidth, inputHeight, PixelFormat::R32f };
 		UpscaleMotion = { inputWidth, inputHeight, PixelFormat::Rg16f };
+		UpscaleReactive = { inputWidth, inputHeight, PixelFormat::R16f };
 		UpscaleInputWidth = inputWidth;
 		UpscaleInputHeight = inputHeight;
 		reset = true;
@@ -1561,20 +2137,24 @@ bool PPTemporalAA::PlatformUpscale(PPRenderState *renderstate, const TemporalUni
 	renderstate->SetNoBlend();
 	renderstate->Draw();
 
-	for (int pass = 0; pass < 2; pass++)
+	bool reactive = ReactiveMask();
+	for (int pass = 0; pass < (reactive ? 3 : 2); pass++)
 	{
+		PPShader *shaders[3] = { &UpscaleDepthShader, &UpscaleMotionShader, &UpscaleReactiveShader };
+		PPTexture *outputs[3] = { &UpscaleDepth, &UpscaleMotion, &UpscaleReactive };
 		renderstate->Clear();
-		renderstate->Shader = pass == 0 ? &UpscaleDepthShader : &UpscaleMotionShader;
+		renderstate->Shader = shaders[pass];
 		renderstate->Uniforms.Set(u);
 		renderstate->Viewport = { 0, 0, inputWidth, inputHeight };
-		renderstate->SetInputSceneDepth(0);
-		renderstate->SetOutputTexture(pass == 0 ? &UpscaleDepth : &UpscaleMotion);
+		if (pass < 2) renderstate->SetInputSceneDepth(0);
+		else renderstate->SetInputSceneNormal(0);
+		renderstate->SetOutputTexture(outputs[pass]);
 		renderstate->SetNoBlend();
 		renderstate->Draw();
 	}
 
 	// The projection was offset by Jitter (scene UV units) this frame.
-	if (!screen->PlatformTemporalUpscale(&UpscaleColor, &UpscaleDepth, &UpscaleMotion, &UpscaleOutput, u.Jitter.X * inputWidth, u.Jitter.Y * inputHeight, reset))
+	if (!screen->PlatformTemporalUpscale(&UpscaleColor, &UpscaleDepth, &UpscaleMotion, reactive ? &UpscaleReactive : nullptr, &UpscaleOutput, u.Jitter.X * inputWidth, u.Jitter.Y * inputHeight, reset))
 	{
 		renderstate->PopGroup();
 		return false; // Use the TAA resolve this frame if MetalFX allocation failed.
@@ -1651,6 +2231,8 @@ void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneH
 	u.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
 	u.Feedback = HistoryValid ? 0.9f : 0.0f;
 	u.Upscale = upscaling ? 1.0f : 0.0f;
+	u.Reactive = ReactiveMask() ? 1.0f : 0.0f;
+	u.Padding0 = u.Padding1 = u.Padding2 = 0.0f;
 
 	if (upscaling && r_upscale_metalfx && screen->SupportsPlatformUpscaler() && PlatformUpscale(renderstate, u, !HistoryValid))
 	{
@@ -1671,6 +2253,7 @@ void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneH
 	renderstate->SetInputCurrent(0, PPFilterMode::Nearest);
 	renderstate->SetInputTexture(1, &History, PPFilterMode::Linear);
 	renderstate->SetInputSceneDepth(2);
+	renderstate->SetInputSceneNormal(3);
 	renderstate->SetOutputNext();
 	renderstate->SetNoBlend();
 	renderstate->Draw();

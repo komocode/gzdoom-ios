@@ -752,6 +752,12 @@ public:
 	int outsidefogdensity;
 	int skyfog;
 
+	// Visual-only weather (hw_weather.h). The flash is transient, in seconds of level time.
+	FWeatherSettings weather;
+	float weatherFlashStart = -1000.f;
+	float weatherFlashDuration = 0.f;
+	float weatherFlashStrength = 0.f;
+
 	FName		deathsequence;
 	float		pixelstretch;
 	float		MusicVolume;
@@ -763,6 +769,14 @@ public:
 	int			ImpactDecalCount;
 	float		thickfogdistance;
 	float		thickfogmultiplier;
+
+	// Height fog of the volumetric pass, from MAPINFO; scripts may change it.
+	double		heightfogdensity;
+	double		heightfogbase;
+	double		heightfogfalloff;
+	double		heightfognoise;
+	PalEntry	heightfogcolor;
+	DVector2	heightfogwind;
 
 	FGlobalDLightLists lightlists;
 

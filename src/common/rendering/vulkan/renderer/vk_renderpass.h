@@ -92,6 +92,7 @@ public:
 	VkFormat OutputFormat;
 	int SwapChain;
 	int ShadowMapBuffers;
+	int StorageBuffer;
 	WhichDepthStencil StencilTest;
 	VkSampleCountFlagBits Samples;
 

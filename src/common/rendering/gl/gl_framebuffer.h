@@ -28,6 +28,7 @@ public:
 	void Update() override;
 
 	void AmbientOccludeScene(float m5) override;
+	void ReflectScene(float m5) override;
 	void FirstEye() override;
 	void NextEye(int eyecount) override;
 	void SetSceneRenderTarget(bool useSSAO) override;

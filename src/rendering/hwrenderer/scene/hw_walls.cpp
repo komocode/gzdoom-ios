@@ -42,6 +42,7 @@
 #include "hwrenderer/scene/hw_portal.h"
 #include "hw_lightbuffer.h"
 #include "hw_renderstate.h"
+#include "hw_modernrender.h"
 #include "hw_skydome.h"
 #include "hw_walldispatcher.h"
 
@@ -214,6 +215,8 @@ void HWWall::RenderTexturedWall(HWWallDispatcher*di, FRenderState &state, int rf
 		SetGlowPlanes(state, frontsector->ceilingplane, frontsector->floorplane);
 	}
 	state.SetMaterial(texture, UF_Texture, 0, flags & 3, NO_TRANSLATION, -1);
+	// TAA: blended walls are fully reactive, warped (liquid) ones partly.
+	if (r_taa_reactive) state.SetReactive((flags & HWWall::HWF_TRANSLUCENT) ? 1.f : texture->isWarped() ? 2.f / 3.f : 0.f);
 #ifdef NPOT_EMULATION
 	// Test code, could be reactivated as a compatibility option in the unlikely event that some old vanilla map eve needs it.
 	if (hw_npottest)
@@ -232,7 +235,14 @@ void HWWall::RenderTexturedWall(HWWallDispatcher*di, FRenderState &state, int rf
 #endif
 
 	// Masked mid textures keep their exact alpha shape, so only solid tiers get parallax.
-	state.SetMaterialParams(0, 0, type != RENDERWALL_M2S && type != RENDERWALL_M2SNF && type != RENDERWALL_COLOR && !(flags & HWWall::HWF_TRANSLUCENT));
+	// Walls reflect only when their GLDEFS material asks for it; a wet sector
+	// darkens them and makes them glossier.
+	float reflectivity = texture && texture->GetReflectivity() > 0 ? texture->GetReflectivity() : 0.f;
+	float gloss = texture && texture->GetReflectRoughness() >= 0 ? 1.f - texture->GetReflectRoughness() : 0.f;
+	float wetness = 0;
+	if (frontsector != nullptr && di->Level != nullptr)
+		wetness = 0.5f * max(frontsector->wetness, di->Level->info ? di->Level->info->wetness : 0.f);
+	state.SetMaterialParams(reflectivity, gloss, type != RENDERWALL_M2S && type != RENDERWALL_M2SNF && type != RENDERWALL_COLOR && !(flags & HWWall::HWF_TRANSLUCENT), wetness);
 
 	if (flags & HWWall::HWF_CLAMPY && (type == RENDERWALL_M2S || type == RENDERWALL_M2SNF) && !texture->isWarped())
 	{

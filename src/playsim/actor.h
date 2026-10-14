@@ -512,6 +512,9 @@ enum ActorRenderFlag2
 	RF2_ANGLEDROLL				= 0x0800,	// Sprite roll amount depends on (actor.Angle - actor.AngledRollOffset)
 	RF2_INTERPOLATESCALE		= 0x1000,
 	RF2_INTERPOLATEALPHA		= 0x2000,
+	RF2_STATICMESH				= 0x4000,	// model geometry takes part in baked GI and ray traced shadows
+	RF2_NOSTATICMESH			= 0x8000,	// never treat the model as static level geometry
+	RF2_SOFTPARTICLE			= 0x10000,	// translucent sprite fades where it meets the opaque scene (smoke, fog, steam cards)
 };
 
 // This translucency value produces the closest match to Heretic's TINTTAB.

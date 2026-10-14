@@ -59,9 +59,10 @@ void FGLRenderer::PostProcessScene(int fixedcm, float flash, const std::function
 
 	GLPPRenderState renderstate(mBuffers);
 
-	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight);
-	mBuffers->BindCurrentFB();
-	if (afterBloomDrawEndScene2D) afterBloomDrawEndScene2D();
+	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight, [&]() {
+		mBuffers->BindCurrentFB();
+		if (afterBloomDrawEndScene2D) afterBloomDrawEndScene2D();
+	});
 	hw_postprocess.Pass2(&renderstate, fixedcm, flash, sceneWidth, sceneHeight);
 }
 
@@ -78,6 +79,15 @@ void FGLRenderer::AmbientOccludeScene(float m5)
 
 	GLPPRenderState renderstate(mBuffers);
 	hw_postprocess.ssao.Render(&renderstate, m5, sceneWidth, sceneHeight);
+}
+
+void FGLRenderer::ReflectScene(float m5)
+{
+	int sceneWidth = mBuffers->GetSceneWidth();
+	int sceneHeight = mBuffers->GetSceneHeight();
+
+	GLPPRenderState renderstate(mBuffers);
+	hw_postprocess.sceneEffects.RenderReflections(&renderstate, m5, sceneWidth, sceneHeight);
 }
 
 void FGLRenderer::BlurScene(float gameinfobluramount)

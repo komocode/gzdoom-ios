@@ -27,6 +27,9 @@ class MetalRenderDevice;
 class FTexture;
 struct FMaterialState;
 
+// Frames the CPU may record while the GPU still executes earlier ones.
+static const int MTL_MAX_FRAMES_IN_FLIGHT = 3;
+
 enum
 {
 	// Scene shaders, both stages
@@ -44,6 +47,9 @@ enum
 	MTLTEX_SHADOWMAP = 12,
 	MTLTEX_LIGHTMAP = 13,
 	MTLTEX_IRRADIANCE = 14,
+	MTLTEX_WEATHER = 15,		// sky exposure map, read without a sampler
+	MTLTEX_SCENEDEPTH = 16,		// half-res linear depth for soft particles, read without a sampler
+	MTLTEX_SCENE_COUNT = 17,
 
 	// Postprocess shaders, fragment stage
 	MTLBUF_PP_UNIFORMS = 0,
@@ -81,12 +87,21 @@ public:
 	void *Lock(unsigned int size) override;
 	void Unlock() override;
 
+	// Data rewritten every frame (uniforms, viewpoints, lights, bones) gets one
+	// buffer per frame in flight, switched at the start of each frame.
+	void SetFrameSlot(int slot);
+
 	MetalRenderDevice *fb = nullptr;
 	std::list<MtlHardwareBuffer*>::iterator it;
 	id<MTLBuffer> mBuffer = nil;
+	bool FrameRing = false;
 
 protected:
 	void Allocate(size_t size, const void *data);
+	void Replace(id<MTLBuffer> buffer);
+
+	id<MTLBuffer> mRing[MTL_MAX_FRAMES_IN_FLIGHT] = {};
+	int mRingSlot = 0;
 };
 
 class MtlHardwareVertexBuffer : public IVertexBuffer, public MtlHardwareBuffer
@@ -153,6 +168,7 @@ public:
 
 	void AddBuffer(MtlHardwareBuffer *buffer);
 	void RemoveBuffer(MtlHardwareBuffer *buffer);
+	void SetFrameSlot(int slot);
 
 	int GetVertexFormat(int numBindingPoints, int numAttributes, size_t stride, const FVertexBufferAttribute *attrs);
 	MtlVertexFormat *GetVertexFormat(int index) { return &VertexFormats[index]; }
@@ -206,6 +222,7 @@ private:
 	MtlTextureImage mImage;
 	MtlTextureImage mDepthStencil;
 	id<MTLBuffer> mLinearBuffer = nil;	// backs the software renderer's output texture
+	uint64_t mLinearFrame = 0;	// last frame that read mLinearBuffer
 	int mTexelsize = 4;
 };
 
@@ -283,6 +300,7 @@ public:
 
 	void SetLightmap(int size, int count, const TArray<uint16_t> &data);
 	void SetIrradianceVolume(int width, int height, int layers, const TArray<uint16_t> &rgbaHalfData);
+	void SetWeatherMap(int width, int height, const TArray<uint16_t> &rgbaHalfData);
 
 	MtlTextureImage *GetTexture(PPTextureType type, PPTexture *tex);
 	MTLPixelFormat GetTextureFormat(PPTexture *tex);
@@ -296,6 +314,8 @@ public:
 	MtlTextureImage Shadowmap;
 	MtlTextureImage Lightmap;
 	MtlTextureImage Irradiance;
+	MtlTextureImage WeatherMap;
+	id<MTLTexture> SceneDepth = nil;	// set after AmbientOccludeScene for the rest of the frame
 
 private:
 	void CreateShadowmap();
@@ -319,6 +339,7 @@ public:
 	int GetSceneWidth() const { return mSceneWidth; }
 	int GetSceneHeight() const { return mSceneHeight; }
 	int GetSceneSamples() const { return mSamples; }
+	int GetBestSampleCount();
 
 	MtlTextureImage SceneColor;
 	MtlTextureImage SceneDepthStencil;
@@ -334,7 +355,6 @@ public:
 
 private:
 	id<MTLTexture> CreateTarget(int width, int height, MTLPixelFormat format, int samples = 1);
-	int GetBestSampleCount();
 
 	MetalRenderDevice *fb = nullptr;
 	int mWidth = 0;
@@ -366,9 +386,8 @@ private:
 	void Build(const hwrenderer::LevelMesh *mesh);
 
 	MetalRenderDevice *fb = nullptr;
-	hwrenderer::LevelMesh *Mesh = nullptr;
 	hwrenderer::LevelMesh *NullMesh = nullptr;	// shaders always need a structure bound
-	bool Built = false;
+	uint64_t BuiltGeneration = 0;	// LevelMesh::Generation of the current structures
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -389,7 +408,7 @@ public:
 	id<MTLFunction> FragmentFunction = nil;
 };
 
-enum class MtlShaderLayout { Scene, PostProcess };
+enum class MtlShaderLayout { Scene, PostProcess, PostProcessRayQuery };
 
 class MtlShaderManager
 {

@@ -19,6 +19,9 @@
 #include "texturemanager.h"
 #include "v_video.h"
 #include "doomdef.h"
+#include "hw_dynlightdata.h"
+#include "hw_lightbuffer.h"
+#include "scene/hw_drawstructs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +40,7 @@ struct FXVertex
 	float vx, vy, vz, gravity;     // VATTR_NORMAL
 	float life, size0, size1, drag; // VATTR_VERTEX2
 	float brightness, floorZ, streak; // VATTR_LIGHTMAP: > 0 additive emission, < 0 alpha-blended albedo scale
-	float u, v;                    // VATTR_TEXCOORD: corner + 2 * shape
+	float u, v;                    // VATTR_TEXCOORD: corner + 2 * (shape + 16 * flags)
 	uint8_t r, g, b, a;            // VATTR_COLOR
 	float nx, ny, nz, planeD;      // VATTR_NORMAL2: plane of the surface the particle came from, for the soft fade
 };
@@ -50,6 +53,13 @@ enum EShape
 	SHAPE_SMOKE,   // dust and smoke, noisy soft edge
 	SHAPE_CHUNK,   // hard-edged debris
 	SHAPE_DROPLET, // blood
+	SHAPE_RING,    // see EFXShape
+	SHAPE_MOTE,
+};
+
+enum
+{
+	PF_UNLIT = 1,  // alpha blended, but not lit by the scene
 };
 
 struct Particle
@@ -68,18 +78,30 @@ struct Particle
 	float planeD = -1e6f; // no plane: never faded
 	FVector3 color = { 1, 1, 1 };
 	float alpha = 1;
-	EShape shape = SHAPE_GLOW;
+	int shape = SHAPE_GLOW;
+	int flags = 0;
 };
 
+// Particles are numbered in emission order; particle n lives in slot n % MaxParticles.
 struct Ring
 {
-	int head = 0;
-	int tail = 0;
+	int64_t head = 0;
+	int64_t tail = 0;
 	float expiry[MaxParticles];
 	int lastMapTime = 0;
 	float lastNow = 0;
+	FLevelLocals *level = nullptr;
+
+	// The first particle of the last few draws. The GPU may still be drawing
+	// those frames (frames in flight), so their slots are not overwritten.
+	static constexpr int History = 8;
+	int64_t drawn[History] = {};
+	int drawIndex = 0;
 
 	bool Empty() const { return head == tail; }
+	int Slot(int64_t n) const { return int(n % MaxParticles); }
+	int64_t OldestDrawn() const { return *std::min_element(drawn, drawn + History); }
+	void Reset() { head = tail = 0; for (auto &d : drawn) d = 0; }
 };
 
 Ring ring;
@@ -192,30 +214,60 @@ bool CreateBuffers()
 
 	screen->mFXParticleVertices = vb;
 	screen->mFXParticleIndices = ib;
-	ring.head = ring.tail = 0;
+	ring.Reset();
 	return true;
 }
 
+// Only the range [tail, head) is drawn, so forgetting the particles is enough;
+// their slots are rewritten as new particles are spawned.
 void ClearRing()
 {
-	if (screen && screen->mFXParticleVertices)
-		memset(screen->mFXParticleVertices->Memory(), 0, MaxParticles * 4 * sizeof(FXVertex));
-	ring.head = ring.tail = 0;
+	// Only the live range is drawn, so emptying it is enough. The slots stay
+	// untouched for frames that may still be drawing them.
+	ring.tail = ring.head;
 }
 
 uint8_t ToByte(float v) { return (uint8_t)std::clamp(int(v * 255.f + 0.5f), 0, 255); }
+
+// Where a falling particle comes to rest: follows the closed-form trajectory
+// in a few steps and returns the floor or 3D floor top under the first sample
+// that is below it, so debris thrown off a ledge lands on the ground below.
+float LandingFloor(const Particle &p)
+{
+	FLevelLocals *level = ring.level;
+	float k = std::max(p.drag, 0.01f);
+	FVector3 terminal(0, 0, p.gravity / k);
+	const int flags = FFCF_3DRESTRICT | FFCF_NOPORTALS;
+	sector_t *sec = level->PointInSector(DVector2(p.pos.X, p.pos.Y));
+	float floor = float(NextLowestFloorAt(sec, p.pos.X, p.pos.Y, p.pos.Z + 1, flags));
+	const int steps = 6;
+	for (int i = 1; i <= steps; i++)
+	{
+		float t = p.life * i / steps;
+		FVector3 pos = p.pos + terminal * t + (p.vel - terminal) * ((1.f - std::exp(-k * t)) / k);
+		sec = level->PointInSector(DVector2(pos.X, pos.Y));
+		float below = float(NextLowestFloorAt(sec, pos.X, pos.Y, std::max(pos.Z, floor) + 1, flags));
+		if (pos.Z <= below) return below;
+		floor = below;
+	}
+	return floor;
+}
 
 void Emit(const Particle &p, float now)
 {
 	FXVertex *vertices = static_cast<FXVertex*>(screen->mFXParticleVertices->Memory());
 	if (!vertices) return;
 
-	int slot = ring.head;
-	ring.head = (ring.head + 1) % MaxParticles;
-	if (ring.head == ring.tail) ring.tail = (ring.tail + 1) % MaxParticles; // full: drop the oldest
+	// Full: drop the new particle rather than overwrite one a frame may still draw.
+	if (ring.head - ring.OldestDrawn() >= MaxParticles) return;
+	if (ring.head - ring.tail >= MaxParticles) ring.tail++;
+	int slot = ring.Slot(ring.head++);
 
 	float start = now + p.delay;
 	ring.expiry[slot] = start + p.life;
+
+	float floorZ = p.floorZ;
+	if (floorZ > -1e5f && p.gravity < -100.f && ring.level) floorZ = LandingFloor(p);
 
 	FXVertex v;
 	v.x = p.pos.X; v.y = p.pos.Z; v.z = p.pos.Y;
@@ -227,7 +279,7 @@ void Emit(const Particle &p, float now)
 	v.size1 = p.size1;
 	v.drag = std::max(p.drag, 0.01f);
 	v.brightness = p.brightness;
-	v.floorZ = p.floorZ;
+	v.floorZ = floorZ;
 	v.streak = p.streak;
 	v.r = ToByte(p.color.X);
 	v.g = ToByte(p.color.Y);
@@ -238,7 +290,7 @@ void Emit(const Particle &p, float now)
 
 	for (int c = 0; c < 4; c++)
 	{
-		v.u = float(c & 1) + 2.f * p.shape;
+		v.u = float(c & 1) + 2.f * float(p.shape + 16 * p.flags);
 		v.v = float(c >> 1);
 		vertices[slot * 4 + c] = v;
 	}
@@ -249,6 +301,7 @@ bool BeginSpawn(FLevelLocals *level, float &now)
 	if (!Enabled() || level == nullptr || level != primaryLevel) return false;
 	if (!CreateBuffers()) return false;
 	now = GameTime(level);
+	ring.level = level;
 	return true;
 }
 
@@ -634,7 +687,8 @@ void FX_MissileExploded(AActor *missile)
 void FX_DrawParticles(HWDrawInfo *di, FRenderState &state)
 {
 	auto level = di->Level;
-	if (!r_gpuparticles || !screen->mFXParticleVertices || level != primaryLevel) return;
+	// Created up front rather than at the first shot, so the backend can prepare its pipelines.
+	if (!r_gpuparticles || level != primaryLevel || !CreateBuffers()) return;
 
 	float now = (level->totaltime - 1 + float(di->Viewpoint.TicFrac)) / TICRATE;
 
@@ -643,15 +697,21 @@ void FX_DrawParticles(HWDrawInfo *di, FRenderState &state)
 	ring.lastMapTime = level->maptime;
 	ring.lastNow = now;
 
-	while (!ring.Empty() && ring.expiry[ring.tail] <= now) ring.tail = (ring.tail + 1) % MaxParticles;
+	while (!ring.Empty() && ring.expiry[ring.Slot(ring.tail)] <= now) ring.tail++;
 	if (ring.Empty()) return;
+	ring.drawn[ring.drawIndex] = ring.tail;
+	ring.drawIndex = (ring.drawIndex + 1) % Ring::History;
+	int tail = ring.Slot(ring.tail), head = ring.Slot(ring.head);
 
 	state.SetVertexBuffer(screen->mFXParticleVertices, 0, 0);
 	state.SetIndexBuffer(screen->mFXParticleIndices);
 	state.SetMaterial(TexMan.GetGameTexture(TexMan.glPart), UF_None, 0, CLAMP_XY_NOMIP, NO_TRANSLATION, -1);
 	state.SetTextureMode(TM_NORMAL);
-	state.EnableFog(false);
-	state.SetLightIndex(-1);
+	// The view sector's fog for all of them; lights and GI are applied per vertex.
+	sector_t *viewsector = di->Viewpoint.sector;
+	if (viewsector) SetFog(state, level, di->lightmode, viewsector->lightlevel, 0, di->isFullbrightScene(), &viewsector->Colormap, false);
+	else state.EnableFog(false);
+	state.SetLightIndex(FX_ParticleLightList(di));
 	state.SetNoSoftLightLevel();
 	state.ResetColor();
 	state.EnableBrightmap(false);
@@ -661,29 +721,140 @@ void FX_DrawParticles(HWDrawInfo *di, FRenderState &state)
 
 	auto drawRange = [&]()
 	{
-		if (ring.tail < ring.head)
+		if (tail < head)
 		{
-			state.DrawIndexed(DT_Triangles, ring.tail * 6, (ring.head - ring.tail) * 6);
+			state.DrawIndexed(DT_Triangles, tail * 6, (head - tail) * 6);
 		}
 		else
 		{
-			state.DrawIndexed(DT_Triangles, ring.tail * 6, (MaxParticles - ring.tail) * 6);
-			if (ring.head > 0) state.DrawIndexed(DT_Triangles, 0, ring.head * 6);
+			state.DrawIndexed(DT_Triangles, tail * 6, (MaxParticles - tail) * 6);
+			if (head > 0) state.DrawIndexed(DT_Triangles, 0, head * 6);
 		}
 	};
+
+	// Soft fade against the opaque scene, scaled up by particle size in the shader.
+	FVector4 soft = { di->SceneDepthReady && r_softparticles ? 4.f : 0.f, 0, 0, 0 };
 
 	// Smoke, dust, debris and blood first, then the emissive particles on top.
 	state.SetRenderStyle(STYLE_Translucent);
 	state.SetParticleParams(now, false);
+	state.SetParticleExtra(soft, { 0, 0, 0, 0 });
 	drawRange();
 
 	state.SetRenderStyle(STYLE_Add);
 	state.SetParticleParams(now, true);
+	state.SetParticleExtra(soft, { 0, 0, 0, 0 });
 	drawRange();
 
+	state.SetParticleExtra({ 0, 0, 0, 0 }, { 0, 0, 0, 0 });
+	state.SetLightIndex(-1);
 	state.SetMaterialParams(0, 0);
 	state.SetRenderStyle(STYLE_Translucent);
 	state.SetDepthMask(true);
 	state.EnableFog(true);
 	state.SetVertexBuffer(screen->mVertexData);
+}
+
+int FX_ParticleLightList(HWDrawInfo *di)
+{
+	FLevelLocals *level = di->Level;
+	if (!level->HasDynamicLights || di->isFullbrightScene() || di->Viewpoint.sector == nullptr) return -1;
+
+	// The strongest lights near the camera, as for the volumetric pass.
+	struct Candidate { float score; FDynamicLight *light; };
+	Candidate best[8];
+	int count = 0;
+	auto &vp = di->Viewpoint;
+	DVector3 forward(vp.Angles.Yaw.Cos() * vp.Angles.Pitch.Cos(), vp.Angles.Yaw.Sin() * vp.Angles.Pitch.Cos(), -vp.Angles.Pitch.Sin());
+	for (FDynamicLight *light = level->lights; light; light = light->next)
+	{
+		if (!light->IsActive() || light->IsSubtractive()) continue;
+		float radius = light->GetRadius();
+		if (radius <= 0) continue;
+		DVector3 delta = light->Pos - vp.Pos;
+		double dist = delta.Length();
+		if (dist > 2048.0 + radius || (delta | forward) < -radius) continue;
+		float brightness = std::max({ light->GetRed(), light->GetGreen(), light->GetBlue() }) / 255.f;
+		if (brightness <= 0.02f) continue;
+		Candidate c = { brightness * radius / float(dist + 64.0), light };
+		if (count < 8) best[count++] = c;
+		else
+		{
+			auto weakest = std::min_element(best, best + count, [](const Candidate &a, const Candidate &b) { return a.score < b.score; });
+			if (c.score > weakest->score) *weakest = c;
+		}
+	}
+	if (count == 0) return -1;
+
+	FDynLightData data;
+	data.Clear();
+	int group = di->Viewpoint.sector->PortalGroup;
+	for (int i = 0; i < count; i++) AddLightToList(data, group, best[i].light, false);
+	return screen->mLights->UploadLights(data);
+}
+
+void FX_SpawnScripted(FLevelLocals *level, const FFXParticleParams &params)
+{
+	float now;
+	if (params.count <= 0 || !BeginSpawn(level, now)) return;
+
+	int count = std::min(params.count, 1024);
+	bool additive = !!(params.flags & FXF_Additive);
+	bool unlit = !!(params.flags & FXF_Unlit);
+	sector_t *sector = level->PointInSector(params.pos.XY());
+	float light = LightFactor(sector);
+	float floorZ = (params.flags & FXF_RestOnFloor) ? float(NextLowestFloorAt(sector, params.pos.X, params.pos.Y, params.pos.Z + 1, FFCF_3DRESTRICT | FFCF_NOPORTALS)) : -1e6f;
+	float brightness = float(params.brightness);
+	if (additive || unlit) brightness = std::max(brightness, 0.01f);
+
+	// Velocity cone around dir.
+	FVector3 axis = FVector3(params.dir);
+	bool cone = axis.LengthSquared() > 1e-6f;
+	FVector3 tangent, bitangent;
+	if (cone)
+	{
+		axis = Normalized(axis);
+		tangent = Normalized(std::fabs(axis.Z) < 0.9f ? FVector3(-axis.Y, axis.X, 0) : FVector3(0, -axis.Z, axis.Y));
+		bitangent = axis ^ tangent;
+	}
+	float cosMax = float(std::cos(std::clamp(params.coneAngle, 0.0, 180.0) * (M_PI / 180.0)));
+
+	PalEntry c1 = params.color1, c2 = params.color2 ? params.color2 : params.color1;
+	FVector3 color1(c1.r / 255.f, c1.g / 255.f, c1.b / 255.f), color2(c2.r / 255.f, c2.g / 255.f, c2.b / 255.f);
+
+	for (int i = 0; i < count; i++)
+	{
+		Particle p;
+		p.shape = std::clamp(params.shape, 0, FXS_Count - 1);
+		p.pos = FVector3(params.pos) + FVector3(Rand(-1.f, 1.f) * float(params.spread.X), Rand(-1.f, 1.f) * float(params.spread.Y), Rand(-1.f, 1.f) * float(params.spread.Z));
+		FVector3 dir;
+		if (cone)
+		{
+			float cosT = 1.f - Rand() * (1.f - cosMax);
+			float sinT = std::sqrt(std::max(0.f, 1.f - cosT * cosT));
+			float phi = Rand(0.f, 6.2831853f);
+			dir = axis * cosT + (tangent * std::cos(phi) + bitangent * std::sin(phi)) * sinT;
+		}
+		else dir = RandUnit();
+		p.vel = dir * Rand(float(params.speedMin), float(std::max(params.speedMax, params.speedMin)));
+		p.gravity = -float(params.gravity);
+		p.drag = std::max(float(params.drag), 0.01f);
+		p.life = std::max(Rand(float(params.lifeMin), float(std::max(params.lifeMax, params.lifeMin))), 0.02f);
+		p.size0 = std::max(float(params.sizeStart), 0.05f);
+		p.size1 = std::max(float(params.sizeEnd), 0.05f);
+		p.delay = Rand(0.f, std::max(float(params.delay), 0.f));
+		float m = Rand();
+		p.color = color1 * (1.f - m) + color2 * m;
+		p.alpha = std::clamp(float(params.alpha), 0.f, 1.f);
+		p.streak = std::max(float(params.stretch), 0.f);
+		p.floorZ = floorZ;
+		if (additive) p.brightness = brightness;
+		else if (unlit)
+		{
+			p.brightness = -brightness;
+			p.flags = PF_UNLIT;
+		}
+		else p.brightness = -std::max(light * brightness, 0.01f);
+		Emit(p, now);
+	}
 }

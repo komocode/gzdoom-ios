@@ -176,12 +176,8 @@ MtlRenderState::MtlRenderState(MetalRenderDevice *fb) : fb(fb), mStreamBufferWri
 	Reset();
 }
 
-id<MTLRenderPipelineState> MtlRenderState::GetPipeline(const MtlPipelineKey &key)
+MTLRenderPipelineDescriptor *MtlRenderState::CreatePipelineDescriptor(const MtlPipelineKey &key)
 {
-	auto &item = mPipelines[key];
-	if (item)
-		return item;
-
 	MtlShaderProgram *program = key.Program;
 	const MtlVertexFormat &vfmt = *fb->GetBufferManager()->GetVertexFormat(key.VertexFormat);
 
@@ -227,12 +223,127 @@ id<MTLRenderPipelineState> MtlRenderState::GetPipeline(const MtlPipelineKey &key
 		desc.stencilAttachmentPixelFormat = MtlRenderBuffers::DepthStencilFormat;
 	}
 	desc.rasterSampleCount = key.Samples;
+	return desc;
+}
+
+id<MTLRenderPipelineState> MtlRenderState::GetPipeline(const MtlPipelineKey &key)
+{
+	auto &item = mPipelines[key];
+	if (item)
+		return item;
+
+	// Take what the prewarm has finished since the last miss.
+	{
+		std::lock_guard<std::mutex> lock(mPrewarm->Mutex);
+		for (auto &done : mPrewarm->Done)
+		{
+			auto &slot = mPipelines[done.first];
+			if (!slot)
+				slot = done.second;
+		}
+		mPrewarm->Done.clear();
+	}
+	if (item)
+		return item;
 
 	NSError *error = nil;
-	item = [fb->device newRenderPipelineStateWithDescriptor:desc error:&error];
+	item = [fb->device newRenderPipelineStateWithDescriptor:CreatePipelineDescriptor(key) error:&error];
 	if (!item)
-		I_FatalError("Metal: could not create pipeline for %s: %s", program->frag.label.UTF8String, error.localizedDescription.UTF8String);
+		I_FatalError("Metal: could not create pipeline for %s: %s", key.Program->frag.label.UTF8String, error.localizedDescription.UTF8String);
 	return item;
+}
+
+// Creating a pipeline compiles its shaders for the vertex layout, attachments
+// and blend state. Until the system shader cache has it, that takes up to
+// hundreds of milliseconds, so the first wall, sky, sprite or particle drawn
+// with a new combination would stall its frame. The common scene combinations
+// are queued here and compiled on Metal's compiler threads instead.
+void MtlRenderState::QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples)
+{
+	FRenderStyle opaque;
+	opaque.BlendOp = STYLEOP_Add;
+	opaque.SrcAlpha = STYLEALPHA_One;
+	opaque.DestAlpha = STYLEALPHA_Zero;
+	opaque.Flags = 0;
+	FRenderStyle opaqueAlpha1 = opaque;
+	opaqueAlpha1.Flags = STYLEF_Alpha1;
+	const FRenderStyle translucent = LegacyRenderStyles[STYLE_Translucent], normal = LegacyRenderStyles[STYLE_Normal], additive = LegacyRenderStyles[STYLE_Add];
+
+	auto queue = [&](MtlShaderProgram *program, int format, const FRenderStyle &style, int drawBuffers, int colorMask = 15)
+	{
+		if (!program || !program->vert || format < 0)
+			return;
+		MtlPipelineKey key;
+		memset(&key, 0, sizeof(key));
+		key.Program = program;
+		key.RenderStyle = style;
+		key.VertexFormat = format;
+		key.ColorMask = colorMask;
+		key.DrawBuffers = drawBuffers;
+		key.ColorFormat = MTLPixelFormatRGBA16Float;
+		key.DepthStencil = 1;
+		key.Samples = samples;
+		if (!mPipelines.count(key) && mPrewarmRequested.insert(key).second)
+			mPrewarmQueue.push_back(key);
+	};
+
+	// The scene, with and without the G-buffer targets that SSAO and the modern effects use.
+	for (int drawBuffers : { 3, 1 })
+	{
+		EPassType passType = drawBuffers > 1 ? GBUFFER_PASS : NORMAL_PASS;
+		for (bool alphatest : { false, true })
+		{
+			for (const auto &style : { opaque, opaqueAlpha1, translucent, normal })
+				queue(shaders->Get(0, alphatest, passType), formats.flat, style, drawBuffers);
+		}
+		// Warped (liquid) flats
+		for (int effect = 1; effect < SHADER_NoTexture; effect++)
+			queue(shaders->Get(effect, false, passType), formats.flat, opaque, drawBuffers);
+		queue(shaders->GetEffect(EFF_STENCIL, passType), formats.flat, opaque, drawBuffers, 8);
+		queue(shaders->Get(SHADER_NoTexture, true, passType), formats.sky, translucent, drawBuffers);
+		for (bool alphatest : { false, true })
+		{
+			queue(shaders->Get(0, alphatest, passType), formats.sky, translucent, drawBuffers);
+			queue(shaders->Get(0, alphatest, passType), formats.particles, translucent, drawBuffers);
+			queue(shaders->Get(0, alphatest, passType), formats.particles, additive, drawBuffers);
+		}
+	}
+}
+
+void MtlRenderState::PumpPrewarm(int maxPending)
+{
+	while (!mPrewarmQueue.empty())
+	{
+		{
+			std::lock_guard<std::mutex> lock(mPrewarm->Mutex);
+			if (mPrewarm->Pending >= maxPending)
+				return;
+			mPrewarm->Pending++;
+		}
+		MtlPipelineKey key = mPrewarmQueue.front();
+		mPrewarmQueue.pop_front();
+		if (mPipelines.count(key))
+		{
+			std::lock_guard<std::mutex> lock(mPrewarm->Mutex);
+			mPrewarm->Pending--;
+			continue;
+		}
+		std::shared_ptr<MtlPipelinePrewarm> prewarm = mPrewarm;
+		[fb->device newRenderPipelineStateWithDescriptor:CreatePipelineDescriptor(key) completionHandler:^(id<MTLRenderPipelineState> pipeline, NSError *error) {
+			std::lock_guard<std::mutex> lock(prewarm->Mutex);
+			if (pipeline)	// failures are reported when the pipeline is used
+				prewarm->Done.push_back({ key, pipeline });
+			prewarm->Pending--;
+			prewarm->Changed.notify_all();
+		}];
+	}
+}
+
+void MtlRenderState::FinishPrewarm()
+{
+	PumpPrewarm(INT_MAX);
+	std::unique_lock<std::mutex> lock(mPrewarm->Mutex);
+	mPrewarm->Changed.wait(lock, [&] { return mPrewarm->Pending == 0; });
 }
 
 id<MTLDepthStencilState> MtlRenderState::GetDepthStencilState(const MtlDepthStencilKey &key)
@@ -761,7 +872,7 @@ void MtlRenderState::ApplyMaterial()
 	auto textures = fb->GetTextureManager();
 	auto samplers = fb->GetSamplerManager();
 
-	id<MTLTexture> bound[MTLTEX_IRRADIANCE + 1];
+	id<MTLTexture> bound[MTLTEX_SCENE_COUNT];
 	id<MTLSamplerState> boundSamplers[MTLTEX_IRRADIANCE + 1];
 
 	if (mMaterial.mMaterial)
@@ -791,9 +902,14 @@ void MtlRenderState::ApplyMaterial()
 	boundSamplers[MTLTEX_LIGHTMAP] = samplers->LightmapSampler;
 	bound[MTLTEX_IRRADIANCE] = textures->Irradiance.Texture;
 	boundSamplers[MTLTEX_IRRADIANCE] = samplers->LightmapSampler;
+	bound[MTLTEX_WEATHER] = textures->WeatherMap.Texture;
+	bound[MTLTEX_SCENEDEPTH] = textures->SceneDepth ? textures->SceneDepth : textures->NullTexture;
 
-	[mEncoder setFragmentTextures:bound withRange:NSMakeRange(0, MTLTEX_IRRADIANCE + 1)];
+	[mEncoder setFragmentTextures:bound withRange:NSMakeRange(0, MTLTEX_SCENE_COUNT)];
 	[mEncoder setFragmentSamplerStates:boundSamplers withRange:NSMakeRange(0, MTLTEX_IRRADIANCE + 1)];
+	// GPU particles and weather sample the irradiance and sky exposure in the vertex stage.
+	[mEncoder setVertexTextures:&bound[MTLTEX_IRRADIANCE] withRange:NSMakeRange(MTLTEX_IRRADIANCE, 2)];
+	[mEncoder setVertexSamplerState:boundSamplers[MTLTEX_IRRADIANCE] atIndex:MTLTEX_IRRADIANCE];
 	mMaterial.mChanged = false;
 }
 

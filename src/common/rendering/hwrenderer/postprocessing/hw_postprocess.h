@@ -5,6 +5,7 @@
 #include <map>
 #include "intrect.h"
 #include "matrix.h"
+#include <functional>
 
 struct PostProcessShader;
 
@@ -31,6 +32,14 @@ enum class ETonemapMode : uint8_t
 enum class PPFilterMode { Nearest, Linear };
 enum class PPWrapMode { Clamp, Repeat };
 enum class PPTextureType { CurrentPipelineTexture, NextPipelineTexture, PPTexture, SceneColor, SceneFog, SceneNormal, SceneDepth, SwapChain, ShadowMap };
+
+// Descriptor set 0 bindings of the optional postprocess inputs below. Input
+// textures use the bindings from 0, the shadow map buffers 4 to 6.
+enum
+{
+	PP_STORAGE_BINDINGPOINT = 10,		// read-only storage buffer (SetStorageData)
+	PP_ACCELERATION_BINDINGPOINT = 11,	// scene acceleration structure (SetRayQuery)
+};
 
 class PPTextureInput
 {
@@ -108,7 +117,15 @@ public:
 		BlendMode = PPBlendMode();
 		Output = PPOutput();
 		ShadowMapBuffers = false;
+		StorageData = nullptr;
+		StorageSize = 0;
+		RayQuery = false;
 	}
+
+	// Backends that can bind a storage buffer from CPU data for one draw.
+	virtual bool SupportsStorageData() const { return false; }
+	// Backends whose postprocess shaders can trace rays against the scene.
+	virtual bool SupportsRayQuery() const { return false; }
 
 	void SetInputTexture(int index, PPTexture *texture, PPFilterMode filter = PPFilterMode::Nearest, PPWrapMode wrap = PPWrapMode::Clamp)
 	{
@@ -160,6 +177,18 @@ public:
 	void SetShadowMapBuffers(bool enable)
 	{
 		ShadowMapBuffers = enable;
+	}
+
+	// The data must stay valid until Draw returns.
+	void SetStorageData(const void *data, int size)
+	{
+		StorageData = data;
+		StorageSize = size;
+	}
+
+	void SetRayQuery(bool enable)
+	{
+		RayQuery = enable;
 	}
 
 	void SetOutputTexture(PPTexture *texture)
@@ -229,6 +258,9 @@ public:
 	PPBlendMode BlendMode;
 	PPOutput Output;
 	bool ShadowMapBuffers = false;
+	const void *StorageData = nullptr;
+	int StorageSize = 0;
+	bool RayQuery = false;
 };
 
 enum class PixelFormat
@@ -237,7 +269,8 @@ enum class PixelFormat
 	Rgba16f,
 	R32f,
 	Rg16f,
-	Rgba16_snorm
+	Rgba16_snorm,
+	R16f
 };
 
 class PPResource
@@ -324,6 +357,7 @@ public:
 	FString Defines;
 	std::vector<UniformFieldDesc> Uniforms;
 	int Version = 330;
+	bool RayQuery = false;	// uses GL_EXT_ray_query; only used where SupportsRayQuery()
 
 	std::unique_ptr<PPShaderBackend> Backend;
 };
@@ -374,6 +408,9 @@ struct BloomDownUniforms
 	FVector2 InvSize;	// texel size of the input
 	float Threshold;
 	float Knee;
+	float ExposureScale;	// manual exposure, exp2(EV bias)
+	float AutoExposure;	// 1 applies the eye adaptation EV
+	float Padding0, Padding1;
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
@@ -384,6 +421,10 @@ struct BloomDownUniforms
 			{ "InvSize", UniformType::Vec2, offsetof(BloomDownUniforms, InvSize) },
 			{ "Threshold", UniformType::Float, offsetof(BloomDownUniforms, Threshold) },
 			{ "Knee", UniformType::Float, offsetof(BloomDownUniforms, Knee) },
+			{ "ExposureScale", UniformType::Float, offsetof(BloomDownUniforms, ExposureScale) },
+			{ "AutoExposure", UniformType::Float, offsetof(BloomDownUniforms, AutoExposure) },
+			{ "Padding0", UniformType::Float, offsetof(BloomDownUniforms, Padding0) },
+			{ "Padding1", UniformType::Float, offsetof(BloomDownUniforms, Padding1) },
 		};
 	}
 };
@@ -419,7 +460,13 @@ public:
 	void RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneHeight, int fixedcm);
 	void RenderBlur(PPRenderState *renderstate, int sceneWidth, int sceneHeight, float gameinfobluramount);
 
+	// The modern bloom of this frame, composited in linear light by the tone
+	// mapper (null when there is none or it was already added to the scene).
+	PPTexture *ModernResult() { return HasModernResult ? &levels[0].VTexture : nullptr; }
+	void ClearModernResult() { HasModernResult = false; }
+
 private:
+	bool HasModernResult = false;
 	void BlurStep(PPRenderState *renderstate, const BlurUniforms &blurUniforms, PPTexture &input, PPTexture &output, PPViewport viewport, bool vertical);
 	void UpdateTextures(int width, int height);
 
@@ -551,22 +598,60 @@ public:
 	PPTexture Texture;
 };
 
+struct ExposureAdaptUniforms
+{
+	float Key;
+	float MinEV;
+	float MaxEV;
+	float Blend;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Key", UniformType::Float, offsetof(ExposureAdaptUniforms, Key) },
+			{ "MinEV", UniformType::Float, offsetof(ExposureAdaptUniforms, MinEV) },
+			{ "MaxEV", UniformType::Float, offsetof(ExposureAdaptUniforms, MaxEV) },
+			{ "Blend", UniformType::Float, offsetof(ExposureAdaptUniforms, Blend) },
+		};
+	}
+};
+
 class PPCameraExposure
 {
 public:
 	void Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight);
 
+	// Classic bloom threshold scale
 	PPTexture CameraTexture = { 1, 1, PixelFormat::R32f };
+
+	// Eye adaptation: the current exposure change in EV (r_autoexposure).
+	PPTexture *AdaptedEV();
+	float AutoExposureWeight() const { return AdaptValid ? 1.f : 0.f; }
+	// Manual exposure: r_exposure plus the level / script bias, as a linear scale.
+	float ExposureScale() const;
+	bool ExposureActive() const;
+	void SetExposureBias(float ev) { ExposureBias = ev; }
 
 private:
 	void UpdateTextures(int width, int height);
+	void RenderClassic(PPRenderState *renderstate);
+	void RenderAdaptation(PPRenderState *renderstate);
 
 	std::vector<PPExposureLevel> ExposureLevels;
 	bool FirstExposureFrame = true;
+	bool FirstAdaptFrame = true;
+	bool AdaptValid = false;
+	uint64_t LastAdaptTime = 0;
+	float ExposureBias = 0.f;
+	PPTexture AdaptTexture = { 1, 1, PixelFormat::R32f };
+	PPTexture ZeroTexture;
 
 	PPShader ExposureExtract = { "shaders/pp/exposureextract.fp", "", ExposureExtractUniforms::Desc() };
+	PPShader ExposureExtractLog = { "shaders/pp/exposureextract.fp", "#define LOGLUMINANCE\n", ExposureExtractUniforms::Desc() };
 	PPShader ExposureAverage = { "shaders/pp/exposureaverage.fp", "", {}, 400 };
 	PPShader ExposureCombine = { "shaders/pp/exposurecombine.fp", "", ExposureCombineUniforms::Desc() };
+	PPShader ExposureAdapt = { "shaders/pp/exposureadapt.fp", "", ExposureAdaptUniforms::Desc() };
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -597,24 +682,111 @@ private:
 
 /////////////////////////////////////////////////////////////////////////////
 
+struct TonemapUniforms
+{
+	FVector2 BloomScale;	// scene viewport within the screen, for the bloom texture
+	FVector2 BloomOffset;
+	float ExposureScale;
+	float AutoExposure;
+	float BloomIntensity;
+	float WhiteScale;
+	float Contrast;
+	float Saturation;
+	float TintAmount;
+	float LutAmount;
+	FVector4 ShadowTint;
+	FVector4 HighTint;
+	float LutBlend;
+	float LutSize0;
+	float LutSize1;
+	float HdrPeak;	// EDR headroom of the display (1 = SDR)
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "BloomScale", UniformType::Vec2, offsetof(TonemapUniforms, BloomScale) },
+			{ "BloomOffset", UniformType::Vec2, offsetof(TonemapUniforms, BloomOffset) },
+			{ "ExposureScale", UniformType::Float, offsetof(TonemapUniforms, ExposureScale) },
+			{ "AutoExposure", UniformType::Float, offsetof(TonemapUniforms, AutoExposure) },
+			{ "BloomIntensity", UniformType::Float, offsetof(TonemapUniforms, BloomIntensity) },
+			{ "WhiteScale", UniformType::Float, offsetof(TonemapUniforms, WhiteScale) },
+			{ "Contrast", UniformType::Float, offsetof(TonemapUniforms, Contrast) },
+			{ "Saturation", UniformType::Float, offsetof(TonemapUniforms, Saturation) },
+			{ "TintAmount", UniformType::Float, offsetof(TonemapUniforms, TintAmount) },
+			{ "LutAmount", UniformType::Float, offsetof(TonemapUniforms, LutAmount) },
+			{ "ShadowTint", UniformType::Vec4, offsetof(TonemapUniforms, ShadowTint) },
+			{ "HighTint", UniformType::Vec4, offsetof(TonemapUniforms, HighTint) },
+			{ "LutBlend", UniformType::Float, offsetof(TonemapUniforms, LutBlend) },
+			{ "LutSize0", UniformType::Float, offsetof(TonemapUniforms, LutSize0) },
+			{ "LutSize1", UniformType::Float, offsetof(TonemapUniforms, LutSize1) },
+			{ "HdrPeak", UniformType::Float, offsetof(TonemapUniforms, HdrPeak) },
+		};
+	}
+};
+
+// Colour grading LUTs and the exposure bias of the current area. Sources, in
+// order of priority: ZScript (PPShader.SetGradingLUT / SetExposureBias), the
+// level's MAPINFO 'gradinglut' / 'exposurebias', then r_grading_lut. Changes
+// crossfade between the old and the new LUT.
+class PPGrading
+{
+public:
+	void SetLevel(const FString &levelName, const FString &lut, float exposureBias);
+	void SetOverrideLUT(const FString &lut, float fadeSeconds);
+	void ClearOverrideLUT(float fadeSeconds);
+	void SetOverrideExposure(float ev, float fadeSeconds);
+	void ClearOverrideExposure(float fadeSeconds);
+	// Advances the crossfades once per frame; returns the exposure bias in EV.
+	float Update();
+	bool Active() const { return Current.IsNotEmpty() || Target.IsNotEmpty(); }
+	// The LUT texture for a name; an empty name is the identity LUT.
+	PPTexture *GetLUT(const FString &name, float &size);
+	const FString &CurrentLUT() const { return Current; }
+	const FString &TargetLUT() const { return Target; }
+	float Blend() const { return Fade; }
+
+private:
+	void StartEVFade(float to, float seconds);
+
+	FString LevelName, LevelLUT;
+	float LevelEV = 0.f;
+	FString OverrideLUT;
+	bool HasOverrideLUT = false;
+	bool HasOverrideEV = false;
+	float LutFadeSeconds = 0.5f;
+
+	FString Current, Target;	// the displayed LUT and the one faded to
+	float Fade = 0.f;
+
+	float EVFrom = 0.f, EVTo = 0.f, EVFade = 1.f, EVFadeSeconds = 1.f;
+	uint64_t LastTime = 0;
+
+	std::map<FString, std::unique_ptr<PPTexture>> Textures;
+	std::map<FString, int> Sizes;
+	std::unique_ptr<PPTexture> Identity;
+};
+
 class PPTonemap
 {
 public:
 	void SetTonemapMode(ETonemapMode tm) { level_tonemap = tm; }
 	void Render(PPRenderState *renderstate);
 	void ClearTonemapPalette() { PaletteTexture = {}; }
+	bool IsPalette() const;
 
 private:
 	void UpdateTextures();
 
 	PPTexture PaletteTexture;
+	PPTexture BlackTexture;
 
-	PPShader LinearShader = { "shaders/pp/tonemap.fp", "#define LINEAR\n", {} };
-	PPShader ReinhardShader = { "shaders/pp/tonemap.fp", "#define REINHARD\n", {} };
-	PPShader HejlDawsonShader = { "shaders/pp/tonemap.fp", "#define HEJLDAWSON\n", {} };
-	PPShader Uncharted2Shader = { "shaders/pp/tonemap.fp", "#define UNCHARTED2\n", {} };
+	PPShader LinearShader = { "shaders/pp/tonemap.fp", "#define LINEAR\n", TonemapUniforms::Desc() };
+	PPShader ReinhardShader = { "shaders/pp/tonemap.fp", "#define REINHARD\n", TonemapUniforms::Desc() };
+	PPShader HejlDawsonShader = { "shaders/pp/tonemap.fp", "#define HEJLDAWSON\n", TonemapUniforms::Desc() };
+	PPShader Uncharted2Shader = { "shaders/pp/tonemap.fp", "#define UNCHARTED2\n", TonemapUniforms::Desc() };
 	PPShader PaletteShader = { "shaders/pp/tonemap.fp", "#define PALETTE\n", {} };
-	PPShader ACESShader = { "shaders/pp/tonemap.fp", "#define ACES\n", {} };
+	PPShader ACESShader = { "shaders/pp/tonemap.fp", "#define ACES\n", TonemapUniforms::Desc() };
 	ETonemapMode level_tonemap = ETonemapMode::None;
 };
 
@@ -731,6 +903,12 @@ public:
 	void Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight);
 	static bool GBufferNeeded();
 
+	// Half-resolution linear depth of the scene viewport, written by Render.
+	// The scene shaders read it afterwards for soft particles.
+	PPTexture *GetLinearDepth() { return &LinearDepthTexture; }
+	int GetDepthWidth() const { return AmbientWidth; }
+	int GetDepthHeight() const { return AmbientHeight; }
+
 private:
 	void CreateShaders();
 	void UpdateTextures(int width, int height);
@@ -801,35 +979,98 @@ struct ReflectionUniforms
 	}
 };
 
-// The uniforms are push constants on Vulkan. 7 lights keep the block at
-// 256 bytes, which every desktop driver and MoltenVK accept.
-enum { MaxVolumetricLights = 7 };
+// Volumetric lights live in a storage buffer, 4 vec4s each (see volumetric.fp),
+// so the push constant block stays small enough for every Vulkan driver.
+enum { MaxVolumetricLights = 32, VolumetricLightVec4s = 4 };
+
+// Medium for the volumetric pass: exponential height fog (optionally rolling
+// with noise) and the camera sector's coloured fog. Densities are extinction
+// per map unit.
+struct VolumetricFog
+{
+	FVector3 Color = { 0.0f, 0.0f, 0.0f };	// height fog colour (linear 0-1)
+	float Density = 0.0f;					// at and below Base; 0 disables height fog
+	float Base = 0.0f;						// map height where the fog thins out
+	float Falloff = 64.0f;					// height over which the density falls to 1/e
+	float Noise = 0.0f;						// 0-1 amount of animated noise
+	float NoiseScale = 1.0f / 160.0f;		// noise frequency per map unit
+	FVector3 NoiseOffset = { 0.0f, 0.0f, 0.0f };	// wind scroll, GL world space
+	float SectorDensity = 0.0f;				// sector fog around the camera
+};
 
 struct VolumetricUniforms
 {
+	FVector4 ViewX;	// view to world rotation (GL world space); w: camera position
+	FVector4 ViewY;
+	FVector4 ViewZ;
 	FVector2 UVToViewA;
 	FVector2 UVToViewB;
+	FVector2 Scale;	// full resolution: the 3D viewport in the scene depth buffer
+	FVector2 Offset;
+	FVector4 FogColor;	// rgb, noise amount
+	FVector4 FogParams;	// base height, 1 / falloff, density, sector fog density
+	FVector4 FogNoise;	// noise offset, noise scale
+	float LinearizeDepthA;
+	float LinearizeDepthB;
+	float InverseDepthRangeA;
+	float InverseDepthRangeB;
 	float Strength;
+	float FogScatter;
+	float MaxDistance;
+	float JitterOffset;
 	int LightCount;
-	float Padding0, Padding1;
-	FVector4 Lights[MaxVolumetricLights * 2];	// view space position + radius, color + core size
+	int Samples;
+	int SampleIndex;
+	int Padding;
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
 		return
 		{
+			{ "ViewX", UniformType::Vec4, offsetof(VolumetricUniforms, ViewX) },
+			{ "ViewY", UniformType::Vec4, offsetof(VolumetricUniforms, ViewY) },
+			{ "ViewZ", UniformType::Vec4, offsetof(VolumetricUniforms, ViewZ) },
 			{ "UVToViewA", UniformType::Vec2, offsetof(VolumetricUniforms, UVToViewA) },
 			{ "UVToViewB", UniformType::Vec2, offsetof(VolumetricUniforms, UVToViewB) },
+			{ "Scale", UniformType::Vec2, offsetof(VolumetricUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(VolumetricUniforms, Offset) },
+			{ "FogColor", UniformType::Vec4, offsetof(VolumetricUniforms, FogColor) },
+			{ "FogParams", UniformType::Vec4, offsetof(VolumetricUniforms, FogParams) },
+			{ "FogNoise", UniformType::Vec4, offsetof(VolumetricUniforms, FogNoise) },
+			{ "LinearizeDepthA", UniformType::Float, offsetof(VolumetricUniforms, LinearizeDepthA) },
+			{ "LinearizeDepthB", UniformType::Float, offsetof(VolumetricUniforms, LinearizeDepthB) },
+			{ "InverseDepthRangeA", UniformType::Float, offsetof(VolumetricUniforms, InverseDepthRangeA) },
+			{ "InverseDepthRangeB", UniformType::Float, offsetof(VolumetricUniforms, InverseDepthRangeB) },
 			{ "Strength", UniformType::Float, offsetof(VolumetricUniforms, Strength) },
+			{ "FogScatter", UniformType::Float, offsetof(VolumetricUniforms, FogScatter) },
+			{ "MaxDistance", UniformType::Float, offsetof(VolumetricUniforms, MaxDistance) },
+			{ "JitterOffset", UniformType::Float, offsetof(VolumetricUniforms, JitterOffset) },
 			{ "LightCount", UniformType::Int, offsetof(VolumetricUniforms, LightCount) },
-			{ "Padding0", UniformType::Float, offsetof(VolumetricUniforms, Padding0) },
-			{ "Padding1", UniformType::Float, offsetof(VolumetricUniforms, Padding1) },
-			{ "Lights[14]", UniformType::Vec4, offsetof(VolumetricUniforms, Lights) },
+			{ "Samples", UniformType::Int, offsetof(VolumetricUniforms, Samples) },
+			{ "SampleIndex", UniformType::Int, offsetof(VolumetricUniforms, SampleIndex) },
+			{ "Padding", UniformType::Int, offsetof(VolumetricUniforms, Padding) },
 		};
 	}
 };
 
 static_assert(sizeof(VolumetricUniforms) <= 256, "volumetric uniforms must fit 256 bytes of push constants");
+
+struct VolumetricBlurUniforms
+{
+	FVector2 InvSize;
+	float DepthSharpness;
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "InvSize", UniformType::Vec2, offsetof(VolumetricBlurUniforms, InvSize) },
+			{ "DepthSharpness", UniformType::Float, offsetof(VolumetricBlurUniforms, DepthSharpness) },
+			{ "Padding", UniformType::Float, offsetof(VolumetricBlurUniforms, Padding) },
+		};
+	}
+};
 
 struct CompositeUniforms
 {
@@ -846,31 +1087,164 @@ struct CompositeUniforms
 	}
 };
 
-// Screen-space reflections and volumetric light scattering. Both run after
-// the opaque geometry, reuse the SSAO linear depth and are composited into
-// the scene before translucent objects are drawn.
+struct SSRUniforms
+{
+	FVector2 UVToViewA;
+	FVector2 UVToViewB;
+	FVector2 Scale;
+	FVector2 Offset;
+	FVector2 InvSize;	// texel size of the trace (linear depth) texture
+	float Strength;
+	float MaxDistance;
+	float Thickness;
+	int Steps;
+	int SampleIndex;
+	float Stretch;		// vertical elongation of rough reflections
+	float Jitter;		// per-frame noise seed while TAA accumulates; 0 = static
+	float FarDepth;		// linear depth of cleared (sky) pixels
+	float LevelHeight;	// height of the blur chain's first level in pixels
+	float Padding0, Padding1, Padding2;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "UVToViewA", UniformType::Vec2, offsetof(SSRUniforms, UVToViewA) },
+			{ "UVToViewB", UniformType::Vec2, offsetof(SSRUniforms, UVToViewB) },
+			{ "Scale", UniformType::Vec2, offsetof(SSRUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(SSRUniforms, Offset) },
+			{ "InvSize", UniformType::Vec2, offsetof(SSRUniforms, InvSize) },
+			{ "Strength", UniformType::Float, offsetof(SSRUniforms, Strength) },
+			{ "MaxDistance", UniformType::Float, offsetof(SSRUniforms, MaxDistance) },
+			{ "Thickness", UniformType::Float, offsetof(SSRUniforms, Thickness) },
+			{ "Steps", UniformType::Int, offsetof(SSRUniforms, Steps) },
+			{ "SampleIndex", UniformType::Int, offsetof(SSRUniforms, SampleIndex) },
+			{ "Stretch", UniformType::Float, offsetof(SSRUniforms, Stretch) },
+			{ "Jitter", UniformType::Float, offsetof(SSRUniforms, Jitter) },
+			{ "FarDepth", UniformType::Float, offsetof(SSRUniforms, FarDepth) },
+			{ "LevelHeight", UniformType::Float, offsetof(SSRUniforms, LevelHeight) },
+			{ "Padding0", UniformType::Float, offsetof(SSRUniforms, Padding0) },
+			{ "Padding1", UniformType::Float, offsetof(SSRUniforms, Padding1) },
+			{ "Padding2", UniformType::Float, offsetof(SSRUniforms, Padding2) },
+		};
+	}
+};
+
+struct SSRDownUniforms
+{
+	FVector2 Scale;
+	FVector2 Offset;
+	FVector2 InvSize;	// texel size of the input
+	int SampleIndex;
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Scale", UniformType::Vec2, offsetof(SSRDownUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(SSRDownUniforms, Offset) },
+			{ "InvSize", UniformType::Vec2, offsetof(SSRDownUniforms, InvSize) },
+			{ "SampleIndex", UniformType::Int, offsetof(SSRDownUniforms, SampleIndex) },
+			{ "Padding", UniformType::Float, offsetof(SSRDownUniforms, Padding) },
+		};
+	}
+};
+
+struct SSRCompositeUniforms
+{
+	FVector2 Scale;
+	FVector2 Offset;
+	int SampleIndex;
+	float Strength;
+	float Padding0, Padding1;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Scale", UniformType::Vec2, offsetof(SSRCompositeUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(SSRCompositeUniforms, Offset) },
+			{ "SampleIndex", UniformType::Int, offsetof(SSRCompositeUniforms, SampleIndex) },
+			{ "Strength", UniformType::Float, offsetof(SSRCompositeUniforms, Strength) },
+			{ "Padding0", UniformType::Float, offsetof(SSRCompositeUniforms, Padding0) },
+			{ "Padding1", UniformType::Float, offsetof(SSRCompositeUniforms, Padding1) },
+		};
+	}
+};
+
+enum { NumReflectionLevels = 5 };
+
+// Screen-space GI and volumetric light scattering run after the opaque
+// geometry, reuse the SSAO linear depth and are composited into the scene
+// before translucent objects are drawn.
+//
+// Screen-space reflections run after the translucent pass and the GPU
+// particles of the main view, so sprites, glows, particles and portal
+// contents appear in them. They trace against a linear depth taken at that
+// point (opaque sprites write depth for this), blur by surface roughness
+// through a small colour pyramid with a vertical stretch, and fall back to the
+// blurred screen (or the sky) where rays miss.
 class PPSceneEffects
 {
 public:
 	void Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight, PPTexture *linearDepth, int depthWidth, int depthHeight);
-	void SetVolumetricLights(const FVector4 *lights, int count);
+	void RenderReflections(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight);
 	bool Active() const;
+
+	// Volumetric input for the next frame, set by the scene renderer: the
+	// packed light list (VolumetricLightVec4s each, see volumetric.fp), the
+	// view matrix and the participating medium.
+	void SetVolumetricLights(const FVector4 *lights, int count);
+	void SetVolumetricView(const float *viewMatrix);
+	void SetVolumetricFog(const VolumetricFog &fog) { Fog = fog; }
+	bool VolumetricActive() const;
+	// Whether the last frame could trace volumetric shadow rays.
+	bool VolumetricRayQuery() const { return LastRayQuery; }
 
 private:
 	void UpdateTextures(int width, int height);
+	void UpdateReflectionTextures(int width, int height);
+	void RenderVolumetrics(PPRenderState *renderstate, const FVector2 &uvToViewA, const FVector2 &uvToViewB, PPTexture *linearDepth);
+	void CreateScatterShaders();
 
 	int Width = 0, Height = 0;
-	PPTexture Reflections;
+	int VolumetricWidth = 0, VolumetricHeight = 0;
 	PPTexture Volumetrics;
+	PPTexture VolumetricsBlur;
 	PPTexture Indirect;
-	VolumetricUniforms Volumetric = {};
+	VolumetricFog Fog;
+	int VolumetricLightCount = 0;
+	FVector4 VolumetricLights[MaxVolumetricLights * VolumetricLightVec4s] = {};
+	FVector4 ViewToWorld[4] = {};
+	int FrameIndex = 0;
+	bool LastRayQuery = false;
 
-	PPShader Reflect = { "shaders/pp/ssr.fp", "", ReflectionUniforms::Desc() };
-	PPShader ReflectMS = { "shaders/pp/ssr.fp", "#define MULTISAMPLE\n", ReflectionUniforms::Desc() };
+	int ReflectWidth = 0, ReflectHeight = 0;
+	unsigned ReflectFrame = 0;
+	PPTexture TraceDepth;
+	PPTexture Reflections;
+	PPTexture ReflectLevels[NumReflectionLevels];
+
+	PPShader TraceLinearDepth = { "shaders/pp/lineardepth.fp", "", LinearDepthUniforms::Desc() };
+	PPShader TraceLinearDepthMS = { "shaders/pp/lineardepth.fp", "#define MULTISAMPLE\n", LinearDepthUniforms::Desc() };
+	PPShader ReflectDownScene = { "shaders/pp/ssrdown.fp", "#define FROM_SCENE\n", SSRDownUniforms::Desc() };
+	PPShader ReflectDownSceneMS = { "shaders/pp/ssrdown.fp", "#define FROM_SCENE\n#define MULTISAMPLE\n", SSRDownUniforms::Desc() };
+	PPShader ReflectDown = { "shaders/pp/ssrdown.fp", "", SSRDownUniforms::Desc() };
+	PPShader Reflect = { "shaders/pp/ssr.fp", "", SSRUniforms::Desc() };
+	PPShader ReflectMS = { "shaders/pp/ssr.fp", "#define MULTISAMPLE\n", SSRUniforms::Desc() };
+	PPShader ReflectComposite = { "shaders/pp/ssrcomposite.fp", "", SSRCompositeUniforms::Desc() };
+	PPShader ReflectCompositeMS = { "shaders/pp/ssrcomposite.fp", "#define MULTISAMPLE\n", SSRCompositeUniforms::Desc() };
 	PPShader Gather = { "shaders/pp/ssgi.fp", "", ReflectionUniforms::Desc() };
 	PPShader GatherMS = { "shaders/pp/ssgi.fp", "#define MULTISAMPLE\n", ReflectionUniforms::Desc() };
-	PPShader Scatter = { "shaders/pp/volumetric.fp", "", VolumetricUniforms::Desc() };
 	PPShader Composite = { "shaders/pp/composite.fp", "", CompositeUniforms::Desc() };
+
+	// Half resolution, full resolution, full resolution with MSAA; then the
+	// same three tracing shadow rays.
+	enum { ScatterHalf, ScatterFull, ScatterFullMS, NumScatterVariants };
+	PPShader Scatter[NumScatterVariants * 2];
+	PPShader ScatterBlur = { "shaders/pp/volumetricblur.fp", "", VolumetricBlurUniforms::Desc() };
+	bool ScatterShadersCreated = false;
 };
 
 struct TemporalUniforms
@@ -888,6 +1262,8 @@ struct TemporalUniforms
 	float LinearizeDepthB;
 	float Feedback;	// history weight, 0 discards the history
 	float Upscale;	// 1 when the input is smaller than the output
+	float Reactive;	// 1 when the scene wrote a reactive mask (normal alpha)
+	float Padding0, Padding1, Padding2;
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
@@ -906,6 +1282,10 @@ struct TemporalUniforms
 			{ "LinearizeDepthB", UniformType::Float, offsetof(TemporalUniforms, LinearizeDepthB) },
 			{ "Feedback", UniformType::Float, offsetof(TemporalUniforms, Feedback) },
 			{ "Upscale", UniformType::Float, offsetof(TemporalUniforms, Upscale) },
+			{ "Reactive", UniformType::Float, offsetof(TemporalUniforms, Reactive) },
+			{ "Padding0", UniformType::Float, offsetof(TemporalUniforms, Padding0) },
+			{ "Padding1", UniformType::Float, offsetof(TemporalUniforms, Padding1) },
+			{ "Padding2", UniformType::Float, offsetof(TemporalUniforms, Padding2) },
 		};
 	}
 };
@@ -934,13 +1314,15 @@ public:
 	// Restores the full scene viewport if the resolve didn't run.
 	void EndUpscale();
 	bool Enabled() const;
+	// The scene pass writes the reactive mask into the normal G-buffer's alpha.
+	bool ReactiveMask() const;
 
 private:
 	void UpdateTextures(int width, int height);
 	bool PlatformUpscale(PPRenderState *renderstate, const TemporalUniforms &u, bool reset);
 
 	// Inputs and output of a platform upscaler (MetalFX)
-	PPTexture UpscaleColor, UpscaleDepth, UpscaleMotion, UpscaleOutput;
+	PPTexture UpscaleColor, UpscaleDepth, UpscaleMotion, UpscaleReactive, UpscaleOutput;
 	int UpscaleInputWidth = 0, UpscaleInputHeight = 0, UpscaleOutputWidth = 0, UpscaleOutputHeight = 0;
 
 	bool Upscaling = false;
@@ -961,6 +1343,7 @@ private:
 	PPShader Resolve = { "shaders/pp/taa.fp", "", TemporalUniforms::Desc() };
 	PPShader UpscaleDepthShader = { "shaders/pp/taainputs.fp", "", TemporalUniforms::Desc() };
 	PPShader UpscaleMotionShader = { "shaders/pp/taainputs.fp", "#define MOTION\n", TemporalUniforms::Desc() };
+	PPShader UpscaleReactiveShader = { "shaders/pp/taainputs.fp", "#define REACTIVE\n", TemporalUniforms::Desc() };
 	PPShader Copy = { "shaders/pp/composite.fp", "", CompositeUniforms::Desc() };
 };
 
@@ -972,7 +1355,7 @@ struct FinishUniforms
 	float Grain;
 	float Time;
 	float Aspect;
-	float Padding;
+	float MaxValue;	// 1, or the EDR headroom (gamma encoded) with HDR output
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
@@ -984,7 +1367,7 @@ struct FinishUniforms
 			{ "Grain", UniformType::Float, offsetof(FinishUniforms, Grain) },
 			{ "Time", UniformType::Float, offsetof(FinishUniforms, Time) },
 			{ "Aspect", UniformType::Float, offsetof(FinishUniforms, Aspect) },
-			{ "Padding", UniformType::Float, offsetof(FinishUniforms, Padding) },
+			{ "MaxValue", UniformType::Float, offsetof(FinishUniforms, MaxValue) },
 		};
 	}
 };
@@ -1117,6 +1500,7 @@ public:
 	PPCameraExposure exposure;
 	PPColormap colormap;
 	PPTonemap tonemap;
+	PPGrading grading;
 	PPAmbientOcclusion ssao;
 	PPSceneEffects sceneEffects;
 	PPTemporalAA taa;
@@ -1127,7 +1511,9 @@ public:
 
 
 	void SetTonemapMode(ETonemapMode tm) { tonemap.SetTonemapMode(tm); }
-	void Pass1(PPRenderState *state, int fixedcm, int sceneWidth, int sceneHeight);
+	// drawWeapon draws the 2D weapon sprites into the current pipeline image:
+	// right after TAA with r_weapon_prebloom (so they bloom), otherwise after bloom.
+	void Pass1(PPRenderState *state, int fixedcm, int sceneWidth, int sceneHeight, const std::function<void()> &drawWeapon);
 	void Pass2(PPRenderState* state, int fixedcm, float flash, int sceneWidth, int sceneHeight);
 };
 

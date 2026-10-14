@@ -39,9 +39,11 @@ void main()
 		+ (f + g + k + l) * 0.03125 + (g + h + l + m) * 0.03125;
 
 #if defined(PREFILTER)
-	// Scene colors are gamma 2.0 encoded; bloom works in linear light.
+	// Scene colors are gamma 2.0 encoded; bloom works in linear light, with the
+	// same exposure as the tone mapper, so the threshold applies to HDR energy
+	// (emissives, lamps, highlights) rather than to every bright texel.
 	color = color * color;
-	float exposure = texture(ExposureTexture, vec2(0.5)).x;
+	float exposure = ExposureScale * exp2(AutoExposure * texture(ExposureTexture, vec2(0.5)).x);
 	color *= exposure;
 	float brightness = max(max(color.r, color.g), color.b);
 	float soft = clamp(brightness - Threshold + Knee, 0.0, 2.0 * Knee);

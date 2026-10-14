@@ -27,6 +27,7 @@
 
 #include "hw_irradiance.h"
 #include "hw_gpuparticles.h"
+#include "hw_weather.h"
 #include "hw_modernrender.h"
 #include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "a_sharedglobal.h"
@@ -34,6 +35,7 @@
 #include "r_sky.h"
 #include "d_player.h"
 #include "g_levellocals.h"
+#include "hw_volumetric.h"
 #include "hw_fakeflat.h"
 #include "hw_portal.h"
 #include "hw_renderstate.h"
@@ -151,6 +153,7 @@ void HWDrawInfo::StartScene(FRenderViewpoint &parentvp, HWViewpointUniforms *uni
 
 	Viewpoint = parentvp;
 	lightmode = getRealLightmode(Level, true);
+	SceneDepthReady = false;
 
 	if (uniforms)
 	{
@@ -184,8 +187,11 @@ void HWDrawInfo::StartScene(FRenderViewpoint &parentvp, HWViewpointUniforms *uni
 		VPUniforms.mRenderFeatures = R_ModernFeatureMask(PPAmbientOcclusion::GBufferNeeded()); // pass type is not set yet here
 		VPUniforms.mSpecularStrength = r_specular_strength;
 		VPUniforms.mNormalStrength = r_autonormal_strength;
+		VPUniforms.mEmissiveStrength = sqrtf(max((float)r_emissive_strength, 0.f));	// the scene is gamma 2.0 encoded
+		VPUniforms.mMipBias = R_SceneMipBias(hw_postprocess.taa.Enabled(), r_upscale);
 		GI_SetUniforms(VPUniforms);
 		if (VPUniforms.mGISize.W == 0) VPUniforms.mRenderFeatures &= ~RF_IRRADIANCE;
+		Weather_SetUniforms(this, VPUniforms);
 	}
 	mClipper->SetViewpoint(Viewpoint);
 	vClipper->SetViewpoint(Viewpoint);
@@ -606,12 +612,18 @@ void HWDrawInfo::RenderTranslucent(FRenderState &state)
 	state.AlphaFunc(Alpha_GEqual, gl_mask_sprite_threshold);
 	state.SetRenderStyle(STYLE_Translucent);
 
+	// Translucent surfaces hide the reflections of what is behind them but
+	// don't reflect themselves.
+	int gbufferMode = state.GetGBufferMode();
+	state.SetGBufferMode(GBUFFER_COVER);
+
 	state.EnableBrightmap(true);
 	drawlists[GLDL_TRANSLUCENTBORDER].Draw(this, state, true);
 	state.SetDepthMask(false);
 
 	drawlists[GLDL_TRANSLUCENT].DrawSorted(this, state);
 	state.EnableBrightmap(false);
+	state.SetGBufferMode(gbufferMode);
 
 
 	state.AlphaFunc(Alpha_GEqual, 0.5f);
@@ -1044,6 +1056,8 @@ void HWDrawInfo::DrawScene(int drawmode)
 	{
 		CreateScene(false);
 	}
+	// Volumetric lights must reach an area the BSP walk just found visible.
+	if (drawmode == DM_MAINVIEW) R_CollectVolumetrics(this);
 	auto& RenderState = *screen->RenderState();
 
 	RenderState.SetDepthMask(true);
@@ -1055,15 +1069,31 @@ void HWDrawInfo::DrawScene(int drawmode)
 	{
 		screen->AmbientOccludeScene(VPUniforms.mProjectionMatrix.get()[5]);
 		screen->mViewpoints->Bind(RenderState, vpIndex);
+		SceneDepthReady = drawmode == DM_MAINVIEW && screen->SceneDepthReadable() && PPAmbientOcclusion::GBufferNeeded();
 	}
 
 	// Handle all portals after rendering the opaque objects but before
-	// doing all translucent stuff
+	// doing all translucent stuff. Surfaces seen through portals are not
+	// reflective: the reflection pass only has the main view's depth.
+	int gbufferMode = RenderState.GetGBufferMode();
+	RenderState.SetGBufferMode(GBUFFER_COVER);
 	recursion++;
 	portalState.EndFrame(this, RenderState);
 	recursion--;
+	RenderState.SetGBufferMode(gbufferMode);
+	// Weather goes before translucent surfaces so that water and glass in front
+	// of it blend over it (see hw_weather.h); GPU particles go after them.
+	if (drawmode == DM_MAINVIEW) Weather_Draw(this, RenderState);
 	RenderTranslucent(RenderState);
 	if (drawmode == DM_MAINVIEW) FX_DrawParticles(this, RenderState);
+
+	// Screen-space reflections of the finished scene, including sprites,
+	// translucent surfaces, particles and portal contents.
+	if (drawmode == DM_MAINVIEW && RenderState.GetPassType() == GBUFFER_PASS && r_ssr > 0)
+	{
+		screen->ReflectScene(VPUniforms.mProjectionMatrix.get()[5]);
+		screen->mViewpoints->Bind(RenderState, vpIndex);
+	}
 }
 
 

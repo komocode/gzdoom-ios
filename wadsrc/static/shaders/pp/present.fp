@@ -7,7 +7,7 @@ layout(binding=1) uniform sampler2D DitherTexture;
 
 vec4 ApplyGamma(vec4 c)
 {
-	c.rgb = min(c.rgb, vec3(2.0)); // for HDR mode - prevents stacked translucent sprites (such as plasma) producing way too bright light
+	c.rgb = min(c.rgb, vec3(HdrMode == 2 ? 4.0 : 2.0)); // for HDR mode - prevents stacked translucent sprites (such as plasma) producing way too bright light
 
 	vec3 valgray;
 	if (GrayFormula == 0)
@@ -45,6 +45,8 @@ vec4 ApplyHdrMode(vec4 c)
 {
 	if (HdrMode == 0)
 		return c;
+	else if (HdrMode == 2) // Metal EDR: extended linear sRGB, 1.0 = SDR white; the scene is gamma 2.0 encoded
+		return vec4(c.rgb * c.rgb, c.a);
 	else
 		return vec4(sRGBtoscRGBLinear(c.rgb), c.a);
 }

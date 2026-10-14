@@ -2,10 +2,17 @@
 ** mtl_buffers.mm
 ** Vertex, index and data buffers for the Metal backend.
 **
-** All buffers live in shared memory. The renderer waits for the GPU at the end
-** of every frame (like the Vulkan backend), so writing through the CPU pointer
-** never races the GPU, and replacing a buffer just drops our reference: command
-** buffers keep the old one alive while they use it.
+** All buffers live in shared memory. The GPU may still execute earlier frames
+** while the CPU records the next one (r_framesinflight), so a CPU write must
+** never land in memory that an unfinished command buffer reads:
+**
+** - Per-frame data (stream uniforms, matrices, viewpoints, lights, bones) is
+**   rewritten every frame and has one buffer per frame in flight (FrameRing).
+** - The flat vertex buffer is N-buffered by FFlatVertexBuffer itself.
+** - Other in-place writes (SetSubData, Lock) go to a copy while the GPU is busy.
+**
+** Replacing a buffer just drops our reference: command buffers keep the old one
+** alive while they use it.
 */
 
 #include "mtl_renderdevice.h"
@@ -15,6 +22,7 @@
 
 MtlHardwareBuffer::MtlHardwareBuffer(MetalRenderDevice *fb) : fb(fb)
 {
+	mRingSlot = fb->FrameSlot();
 	fb->GetBufferManager()->AddBuffer(this);
 }
 
@@ -27,17 +35,43 @@ MtlHardwareBuffer::~MtlHardwareBuffer()
 void MtlHardwareBuffer::Reset()
 {
 	mBuffer = nil;
+	for (auto &buffer : mRing)
+		buffer = nil;
 	map = nullptr;
+}
+
+void MtlHardwareBuffer::Replace(id<MTLBuffer> buffer)
+{
+	mBuffer = buffer;
+	if (FrameRing)
+	{
+		// The other frames get a buffer of the new size when they come up.
+		for (auto &slot : mRing)
+			slot = nil;
+		mRing[mRingSlot] = buffer;
+	}
 }
 
 void MtlHardwareBuffer::Allocate(size_t size, const void *data)
 {
 	size_t bufsize = std::max(size, (size_t)16); // For supporting zero byte buffers
 	if (data)
-		mBuffer = [fb->device newBufferWithBytes:data length:bufsize options:MTLResourceStorageModeShared];
+		Replace([fb->device newBufferWithBytes:data length:bufsize options:MTLResourceStorageModeShared]);
 	else
-		mBuffer = [fb->device newBufferWithLength:bufsize options:MTLResourceStorageModeShared];
+		Replace([fb->device newBufferWithLength:bufsize options:MTLResourceStorageModeShared]);
 	buffersize = size;
+}
+
+void MtlHardwareBuffer::SetFrameSlot(int slot)
+{
+	if (!FrameRing || !mBuffer || slot == mRingSlot)
+		return;
+	mRingSlot = slot;
+	if (!mRing[slot] || mRing[slot].length != mBuffer.length)
+		mRing[slot] = [fb->device newBufferWithLength:mBuffer.length options:MTLResourceStorageModeShared];
+	mBuffer = mRing[slot];
+	if (map)
+		map = mBuffer.contents;
 }
 
 void MtlHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType usage)
@@ -59,7 +93,17 @@ void MtlHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType u
 void MtlHardwareBuffer::SetSubData(size_t offset, size_t size, const void *data)
 {
 	if (mBuffer && offset + size <= mBuffer.length)
+	{
+		// Partial updates (the shadow map's dynamic AABB nodes) go to a copy
+		// while earlier frames may still read the buffer.
+		if (!FrameRing && fb->GpuBusy())
+		{
+			Replace([fb->device newBufferWithBytes:mBuffer.contents length:mBuffer.length options:MTLResourceStorageModeShared]);
+			if (map)
+				map = mBuffer.contents;
+		}
 		memcpy((uint8_t*)mBuffer.contents + offset, data, size);
+	}
 }
 
 void MtlHardwareBuffer::Resize(size_t newsize)
@@ -67,7 +111,7 @@ void MtlHardwareBuffer::Resize(size_t newsize)
 	newsize = std::max(newsize, (size_t)16);
 	id<MTLBuffer> old = mBuffer;
 	size_t oldsize = buffersize;
-	mBuffer = [fb->device newBufferWithLength:newsize options:MTLResourceStorageModeShared];
+	Replace([fb->device newBufferWithLength:newsize options:MTLResourceStorageModeShared]);
 	if (old)
 		memcpy(mBuffer.contents, old.contents, std::min(oldsize, newsize));
 	buffersize = newsize;
@@ -87,7 +131,8 @@ void MtlHardwareBuffer::Unmap()
 void *MtlHardwareBuffer::Lock(unsigned int size)
 {
 	size = std::max(size, (unsigned int)16);
-	if (!mBuffer || mBuffer.length < size)
+	// Lock rewrites the contents: use new memory if the GPU may still read the old.
+	if (!mBuffer || mBuffer.length < size || fb->GpuBusy())
 		Allocate(size, nullptr);
 	map = mBuffer.contents;
 	return map;
@@ -113,6 +158,7 @@ MtlStreamBuffer::MtlStreamBuffer(MetalRenderDevice *fb, size_t structSize, size_
 {
 	mBlockSize = static_cast<uint32_t>((structSize + screen->uniformblockalignment - 1) / screen->uniformblockalignment * screen->uniformblockalignment);
 	UniformBuffer = (MtlHardwareDataBuffer*)fb->GetBufferManager()->CreateDataBuffer(-1, false, false);
+	UniformBuffer->FrameRing = true;
 	UniformBuffer->SetData(mBlockSize * count, nullptr, BufferUsageType::Persistent);
 }
 
@@ -186,6 +232,12 @@ void MtlBufferManager::RemoveBuffer(MtlHardwareBuffer *buffer)
 	}
 }
 
+void MtlBufferManager::SetFrameSlot(int slot)
+{
+	for (auto buffer : Buffers)
+		buffer->SetFrameSlot(slot);
+}
+
 IVertexBuffer *MtlBufferManager::CreateVertexBuffer()
 {
 	return new MtlHardwareVertexBuffer(fb);
@@ -201,12 +253,12 @@ IDataBuffer *MtlBufferManager::CreateDataBuffer(int bindingpoint, bool ssbo, boo
 	auto buffer = new MtlHardwareDataBuffer(fb, bindingpoint);
 	switch (bindingpoint)
 	{
-	case LIGHTBUF_BINDINGPOINT: LightBufferSSO = buffer; break;
-	case VIEWPOINT_BINDINGPOINT: ViewpointUBO = buffer; break;
+	case LIGHTBUF_BINDINGPOINT: LightBufferSSO = buffer; buffer->FrameRing = true; break;
+	case VIEWPOINT_BINDINGPOINT: ViewpointUBO = buffer; buffer->FrameRing = true; break;
 	case LIGHTNODES_BINDINGPOINT: LightNodes = buffer; break;
 	case LIGHTLINES_BINDINGPOINT: LightLines = buffer; break;
 	case LIGHTLIST_BINDINGPOINT: LightList = buffer; break;
-	case BONEBUF_BINDINGPOINT: BoneBufferSSO = buffer; break;
+	case BONEBUF_BINDINGPOINT: BoneBufferSSO = buffer; buffer->FrameRing = true; break;
 	default: break;
 	}
 	return buffer;

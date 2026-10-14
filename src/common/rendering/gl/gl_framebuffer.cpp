@@ -104,6 +104,8 @@ OpenGLFrameBuffer::~OpenGLFrameBuffer()
 	if (mSkyData != nullptr) delete mSkyData;
 	delete mFXParticleVertices;
 	delete mFXParticleIndices;
+	delete mWeatherVertices;
+	delete mWeatherIndices;
 	if (mViewpoints != nullptr) delete mViewpoints;
 	if (mLights != nullptr) delete mLights;
 	if (mBones != nullptr) delete mBones;
@@ -415,6 +417,16 @@ void OpenGLFrameBuffer::AmbientOccludeScene(float m5)
 {
 	gl_RenderState.EnableDrawBuffers(1);
 	GLRenderer->AmbientOccludeScene(m5);
+	glViewport(screen->mSceneViewport.left, mSceneViewport.top, mSceneViewport.width, mSceneViewport.height);
+	GLRenderer->mBuffers->BindSceneFB(true);
+	gl_RenderState.EnableDrawBuffers(gl_RenderState.GetPassDrawBufferCount());
+	gl_RenderState.Apply();
+}
+
+void OpenGLFrameBuffer::ReflectScene(float m5)
+{
+	gl_RenderState.EnableDrawBuffers(1);
+	GLRenderer->ReflectScene(m5);
 	glViewport(screen->mSceneViewport.left, mSceneViewport.top, mSceneViewport.width, mSceneViewport.height);
 	GLRenderer->mBuffers->BindSceneFB(true);
 	gl_RenderState.EnableDrawBuffers(gl_RenderState.GetPassDrawBufferCount());

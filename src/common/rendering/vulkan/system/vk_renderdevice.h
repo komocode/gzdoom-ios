@@ -64,11 +64,15 @@ public:
 	void BeginFrame() override;
 	void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t>& LMTextureData) override;
 	void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData) override;
+	bool InitWeatherMap(int width, int height, TArray<uint16_t>& rgbaHalfData) override;
+	bool SceneDepthReadable() override { return true; }
 	void BlurScene(float amount) override;
 	void PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D) override;
 	void AmbientOccludeScene(float m5) override;
+	void ReflectScene(float m5) override;
 	void SetSceneRenderTarget(bool useSSAO) override;
 	void SetLevelMesh(hwrenderer::LevelMesh* mesh) override;
+	bool RaytracedShadowsActive() override { return RaytracingEnabled(); }
 	void UpdateShadowMap() override;
 	void SetSaveBuffers(bool yes) override;
 	void ImageTransitionScene(bool unknown) override;

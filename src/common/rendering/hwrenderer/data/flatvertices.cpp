@@ -168,6 +168,10 @@ void FFlatVertexBuffer::Copy(int start, int count)
 {
 	IVertexBuffer* old = mVertexBuffer;
 
+	// This writes every pipeline buffer, including those of frames the GPU may still be drawing.
+	if (mPipelineNbr > 1)
+		screen->WaitForCommands(false);
+
 	for (int n = 0; n < mPipelineNbr; n++)
 	{
 		mVertexBuffer = mVertexBufferPipeline[n];

@@ -479,6 +479,35 @@ struct FSpawnParticleParams
 	native double rollacc;
 };
 
+// Visual-only GPU particles (LevelLocals.SpawnFXParticles). They never touch
+// game state or the game's random numbers, so they are safe in netplay and
+// demos, and are not saved. Fill in what you need; zero fields are defaults
+// where noted.
+struct FXParticleParams
+{
+	native Color color1;		// colour; each particle mixes randomly toward color2
+	native Color color2;		// 0 = color1
+	native int count;
+	native int shape;			// EFXShape
+	native int flags;			// EFXFlags
+	native Vector3 pos;
+	native Vector3 spread;		// random offset within +- spread on each axis
+	native Vector3 dir;			// axis of the velocity cone; zero = any direction
+	native double coneAngle;	// degrees off dir
+	native double speedMin;
+	native double speedMax;
+	native double gravity;		// downward acceleration (map units/s^2); negative rises
+	native double drag;			// velocity damping per second
+	native double lifeMin;		// seconds
+	native double lifeMax;
+	native double sizeStart;
+	native double sizeEnd;
+	native double alpha;
+	native double brightness;	// emissive intensity, or albedo scale for lit particles
+	native double stretch;		// motion streak in seconds of travel (0: round)
+	native double delay;		// random start delay up to this many seconds
+}
+
 struct LevelLocals native
 {
 	enum EUDMF
@@ -559,6 +588,13 @@ struct LevelLocals native
 	native readonly float thickfogmultiplier;
 	native readonly float pixelstretch;
 	native readonly float MusicVolume;
+	// Height fog of the volumetric pass (r_volumetric); density is per 1000 map units.
+	native readonly double heightfogdensity;
+	native readonly double heightfogbase;
+	native readonly double heightfogfalloff;
+	native readonly double heightfognoise;
+	native readonly color heightfogcolor;
+	native vector2 heightfogwind;
 	native name deathsequence;
 	native readonly int compatflags;
 	native readonly int compatflags2;
@@ -590,6 +626,7 @@ struct LevelLocals native
 	native vector3, int PickPlayerStart(int pnum, int flags = 0);
 	native int isFrozen() const;
 	native void setFrozen(bool on);
+	native void SetHeightFog(double density, double baseheight = 0, double falloff = 64, color fogcolor = 0x80888c, double noise = 0);
 	native string LookupString(uint index);
 
 	native clearscope Sector PointInSector(Vector2 pt) const;
@@ -645,6 +682,14 @@ struct LevelLocals native
 	native String GetEpisodeName();
 
 	native void SpawnParticle(FSpawnParticleParams p);
+	native clearscope void SpawnFXParticles(FXParticleParams p);
+
+	// Visual-only weather. type is EWeatherType; windAngle is the direction the
+	// wind blows toward. Savegames keep it. WeatherFlash adds a lightning flash
+	// to weather, particles and open-sky surfaces without changing sector lights.
+	native void SetWeather(int type, double density = 1, double windSpeed = 0, double windAngle = 0, Color tint = 0, double dropLength = 1, double fallSpeed = 1);
+	native clearscope int GetWeather();
+	native void WeatherFlash(double strength = 1, double duration = 0.4);
 	native VisualThinker SpawnVisualThinker(Class<VisualThinker> type, bool clientSide = false);
 
 	clearscope native static bool WorldPaused(bool checkLag = true);

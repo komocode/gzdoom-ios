@@ -179,6 +179,10 @@ void DLightningThinker::LightningFlash ()
 	}
 
 	Level->flags |= LEVEL_SWAPSKIES;	// set alternate sky
+	// Visual only: the renderer lights rain and open-sky surfaces with the flash.
+	Level->weatherFlashStart = float(Level->maptime) / TICRATE;
+	Level->weatherFlashDuration = float(LightningFlashCount) / TICRATE;
+	Level->weatherFlashStrength = (flashLight - 160) / 95.f;
 	if (TempLightningSound == NO_SOUND)
 	{
 		S_Sound(CHAN_AUTO, 0, Level->LightningSound, 1.0, ATTN_NONE);

@@ -44,6 +44,10 @@ public:
 	{
 		return sourcetex->GetDetailScale();
 	}
+	float GetEmissive() const
+	{
+		return sourcetex->GetEmissive();
+	}
 
 	FGameTexture* Source() const
 	{

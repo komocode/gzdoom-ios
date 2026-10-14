@@ -35,6 +35,7 @@
 #include "vulkan/textures/vk_imagetransition.h"
 #include "vulkan/textures/vk_texture.h"
 #include "vulkan/textures/vk_framebuffer.h"
+#include "vulkan/renderer/vk_descriptorset.h"
 #include "hw_cvars.h"
 #include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "hwrenderer/postprocessing/hw_postprocess_cvars.h"
@@ -71,9 +72,10 @@ void VkPostprocess::PostProcessScene(int fixedcm, float flash, const std::functi
 
 	VkPPRenderState renderstate(fb);
 
-	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight);
-	SetActiveRenderTarget();
-	afterBloomDrawEndScene2D();
+	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight, [&]() {
+		SetActiveRenderTarget();
+		afterBloomDrawEndScene2D();
+	});
 	hw_postprocess.Pass2(&renderstate, fixedcm, flash, sceneWidth, sceneHeight);
 }
 
@@ -250,6 +252,30 @@ void VkPostprocess::AmbientOccludeScene(float m5)
 	hw_postprocess.ssao.Render(&renderstate, m5, sceneWidth, sceneHeight);
 
 	ImageTransitionScene(false);
+
+	// Soft particles read the linear depth during the rest of the scene pass.
+	if (PPAmbientOcclusion::GBufferNeeded())
+	{
+		VkTextureImage* depth = fb->GetTextureManager()->GetTexture(PPTextureType::PPTexture, hw_postprocess.ssao.GetLinearDepth());
+		if (depth && depth->View)
+		{
+			VkImageTransition()
+				.AddImage(depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
+				.Execute(fb->GetCommands()->GetDrawCommands());
+			fb->GetDescriptorSetManager()->SetSceneDepth(depth);
+		}
+	}
+}
+
+void VkPostprocess::ReflectScene(float m5)
+{
+	int sceneWidth = fb->GetBuffers()->GetSceneWidth();
+	int sceneHeight = fb->GetBuffers()->GetSceneHeight();
+
+	VkPPRenderState renderstate(fb);
+	hw_postprocess.sceneEffects.RenderReflections(&renderstate, m5, sceneWidth, sceneHeight);
+
+	ImageTransitionScene(false);
 }
 
 void VkPostprocess::BlurScene(float gameinfobluramount)
@@ -275,10 +301,15 @@ void VkPostprocess::ClearTonemapPalette()
 
 void VkPostprocess::UpdateShadowMap()
 {
+	// The light list still assigns the shadow indices that mark lights as
+	// shadowed; traced shadows don't need the 1D maps themselves.
 	if (screen->mShadowMap.PerformUpdate())
 	{
-		VkPPRenderState renderstate(fb);
-		hw_postprocess.shadowmap.Update(&renderstate);
+		if (!fb->RaytracingEnabled())
+		{
+			VkPPRenderState renderstate(fb);
+			hw_postprocess.shadowmap.Update(&renderstate);
+		}
 
 		VkImageTransition()
 			.AddImage(&fb->GetTextureManager()->Shadowmap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)

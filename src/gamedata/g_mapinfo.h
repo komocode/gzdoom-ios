@@ -324,6 +324,26 @@ struct FExitText
 };
 
 
+enum EWeatherType
+{
+	WEATHER_None,
+	WEATHER_Rain,
+	WEATHER_Snow,
+};
+
+// Visual-only weather (hw_weather.h). MAPINFO gives a level's starting values
+// and ZScript can change them (LevelLocals.SetWeather); savegames keep them.
+struct FWeatherSettings
+{
+	int Type = WEATHER_None;
+	float Density = 1.f;		// drop count multiplier, 0-2
+	float WindSpeed = 0.f;		// map units per second
+	float WindAngle = 0.f;		// direction the wind blows toward, degrees
+	float Length = 1.f;			// streak length (rain) or flake size (snow) multiplier
+	float FallSpeed = 1.f;		// fall speed multiplier
+	uint32_t Color = 0;			// tint; 0 = default (cool grey rain, white snow)
+};
+
 struct level_info_t
 {
 	int			levelnum;
@@ -369,6 +389,9 @@ struct level_info_t
 	unsigned int cdid;
 	double		gravity;
 	double		aircontrol;
+	float		wetness;		// default wetness of every sector for screen-space reflections (0-1)
+	float		puddles;		// default puddle coverage of every floor (0-1)
+	float		rainripples;	// rain ripples on wet floors under a sky ceiling (0-1)
 	int			WarpTrans;
 	int			airsupply;
 	uint32_t	compatflags, compatflags2;
@@ -386,6 +409,14 @@ struct level_info_t
 	float		thickfogdistance;
 	float		thickfogmultiplier;
 	float		pixelstretch;
+	// Exponential height fog of the volumetric pass (density per 1000 map units).
+	double		heightfogdensity;
+	double		heightfogbase;
+	double		heightfogfalloff;
+	double		heightfognoise;
+	uint32_t	heightfogcolor;
+	DVector2	heightfogwind;
+	FWeatherSettings weather;
 
 	// Redirection: If any player is carrying the specified item, then
 	// you go to the RedirectMap instead of this one.
@@ -432,6 +463,8 @@ struct level_info_t
 	bool		fs_nocheckposition;
 	ELightBlendMode lightblendmode;
 	ETonemapMode tonemap;
+	FString		gradinglut;
+	float		exposurebias;
 	
 	CutsceneDef intro, outro;
 

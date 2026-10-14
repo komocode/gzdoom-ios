@@ -7,6 +7,7 @@
 
 class VulkanRenderDevice;
 class VkMaterial;
+class VkTextureImage;
 class PPTextureInput;
 class VkPPRenderPassSetup;
 
@@ -20,6 +21,8 @@ public:
 	void Deinit();
 	void BeginFrame();
 	void UpdateFixedSet();
+	// Binds the half-resolution linear depth to the scene shaders for the rest of the frame.
+	void SetSceneDepth(VkTextureImage* image);
 	void UpdateHWBufferSet();
 	void ResetHWTextureSets();
 
@@ -33,7 +36,7 @@ public:
 
 	std::unique_ptr<VulkanDescriptorSet> AllocateTextureDescriptorSet(int numLayers);
 
-	VulkanDescriptorSet* GetInput(VkPPRenderPassSetup* passSetup, const TArray<PPTextureInput>& textures, bool bindShadowMapBuffers);
+	VulkanDescriptorSet* GetInput(VkPPRenderPassSetup* passSetup, const TArray<PPTextureInput>& textures, bool bindShadowMapBuffers, VulkanBuffer* storage = nullptr);
 
 	void AddMaterial(VkMaterial* texture);
 	void RemoveMaterial(VkMaterial* texture);
@@ -66,6 +69,7 @@ private:
 	std::unique_ptr<VulkanDescriptorSet> NullTextureDescriptorSet;
 
 	std::list<VkMaterial*> Materials;
+	VkTextureImage* SceneDepth = nullptr;
 
 	static const int maxSets = 10;
 };

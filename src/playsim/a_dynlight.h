@@ -287,6 +287,11 @@ public:
 
 	double lightDefIntensity;
 
+	// Renderer state of the volumetric pass: visibility fade and whether the
+	// light had shadowed light shafts last frame (both for hysteresis).
+	float volumetricFade;
+	bool volumetricShadowed;
+
 	FDynamicLightTouchLists touchlists;
 };
 

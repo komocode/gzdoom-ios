@@ -29,7 +29,7 @@ void main()
 		vec3 mx = max(c, max(max(n, s), max(e, w)));
 		vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(1e-4)), 0.0, 1.0));
 		vec3 wgt = amp * (-1.0 / mix(8.0, 5.0, Sharpen));
-		c = clamp((c + (n + s + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, 1.0);
+		c = clamp((c + (n + s + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, MaxValue);
 	}
 
 	if (Vignette > 0.0)

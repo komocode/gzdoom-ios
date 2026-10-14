@@ -123,7 +123,14 @@ void MtlHardwareTexture::AllocateBuffer(int w, int h, int texelsize)
 
 uint8_t *MtlHardwareTexture::MapBuffer()
 {
-	return mLinearBuffer ? (uint8_t*)mLinearBuffer.contents : nullptr;
+	if (!mLinearBuffer)
+		return nullptr;
+	// The software renderer alternates between two of these. With more frames
+	// in flight than that, wait until the frame that last showed this one is done.
+	if (mLinearFrame && mLinearFrame < fb->CurrentFrame())
+		fb->WaitForFrame(mLinearFrame);
+	mLinearFrame = fb->CurrentFrame();
+	return (uint8_t*)mLinearBuffer.contents;
 }
 
 unsigned int MtlHardwareTexture::CreateTexture(unsigned char *buffer, int w, int h, int texunit, bool mipmap, const char *name)
@@ -352,6 +359,7 @@ MtlPPTexture::MtlPPTexture(MetalRenderDevice *fb, PPTexture *texture) : fb(fb)
 	case PixelFormat::R32f: Format = MTLPixelFormatR32Float; pixelsize = 4; break;
 	case PixelFormat::Rg16f: Format = MTLPixelFormatRG16Float; pixelsize = 4; break;
 	case PixelFormat::Rgba16_snorm: Format = MTLPixelFormatRGBA16Snorm; pixelsize = 8; break;
+	case PixelFormat::R16f: Format = MTLPixelFormatR16Float; pixelsize = 2; break;
 	}
 
 	MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:Format width:texture->Width height:texture->Height mipmapped:NO];
@@ -413,6 +421,7 @@ MtlTextureManager::MtlTextureManager(MetalRenderDevice *fb) : fb(fb)
 	data.Push(0x3c00); // half-float 1.0
 	SetLightmap(1, 1, data);
 	SetIrradianceVolume(0, 0, 0, {});
+	SetWeatherMap(0, 0, {});
 }
 
 MtlTextureManager::~MtlTextureManager()
@@ -430,6 +439,7 @@ void MtlTextureManager::Deinit()
 
 void MtlTextureManager::BeginFrame()
 {
+	SceneDepth = nil;
 	if (Shadowmap.Width() != gl_shadowmap_quality)
 		CreateShadowmap();
 }
@@ -456,6 +466,17 @@ void MtlTextureManager::SetIrradianceVolume(int width, int height, int layers, c
 		return;
 	}
 	UploadHalfArray(Irradiance, width, height, layers, rgbaHalfData.Data(), 4);
+}
+
+void MtlTextureManager::SetWeatherMap(int width, int height, const TArray<uint16_t> &rgbaHalfData)
+{
+	if (width <= 0 || height <= 0 || rgbaHalfData.Size() < unsigned(width * height * 4))
+	{
+		uint16_t black[4] = { 0, 0, 0, 0 };
+		UploadHalfArray(WeatherMap, 1, 1, 1, black, 4);
+		return;
+	}
+	UploadHalfArray(WeatherMap, width, height, 1, rgbaHalfData.Data(), 4);
 }
 
 void MtlTextureManager::UploadHalfArray(MtlTextureImage &image, int w, int h, int count, const uint16_t *src, int srcChannels)

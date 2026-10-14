@@ -1194,6 +1194,7 @@ class GLDefsParser
 		bool disable_fullbright=false;
 		bool thiswad = false;
 		bool iwad = false;
+		float emissive = -1.f;
 		FGameTexture *bmtex = NULL;
 
 		sc.MustGetString();
@@ -1226,6 +1227,12 @@ class GLDefsParser
 			{
 				// only affects textures defined in the IWAD.
 				iwad = true;
+			}
+			else if (sc.Compare("emissive"))
+			{
+				// HDR emission strength of the bright texels in the modern renderer.
+				sc.MustGetFloat();
+				emissive = (float)max(sc.Float, 0.);
 			}
 			else if (sc.Compare ("map"))
 			{
@@ -1263,6 +1270,7 @@ class GLDefsParser
 		{
 			tex->SetBrightmap(bmtex);
 		}	
+		if (emissive >= 0) tex->SetEmissive(emissive);
 		tex->SetDisableFullbright(disable_fullbright);
 	}
 
@@ -1290,6 +1298,7 @@ class GLDefsParser
 		bool thiswad = false;
 		bool iwad = false;
 		bool no_mipmap = false;
+		float emissive = -1.f;
 
 		UserShaderDesc usershader;
 		TArray<FString> texNameList;
@@ -1352,6 +1361,34 @@ class GLDefsParser
 			{
 				sc.MustGetFloat();
 				mlay.SpecularLevel = (float)sc.Float;
+			}
+			else if (sc.Compare("reflectivity"))
+			{
+				// Screen-space reflection strength (0-1) on any surface using this texture.
+				sc.MustGetFloat();
+				mlay.Reflectivity = clamp((float)sc.Float, 0.f, 1.f);
+			}
+			else if (sc.Compare("roughness"))
+			{
+				// Either a roughness map or a number: how blurred reflections are (0-1).
+				if (sc.CheckFloat())
+				{
+					mlay.ReflectRoughness = clamp((float)sc.Float, 0.f, 1.f);
+				}
+				else
+				{
+					sc.MustGetString();
+					if (textures[4])
+						Printf("Multiple roughness definitions in texture %s\n", tex ? tex->GetName().GetChars() : "(null)");
+					textures[4] = TexMan.FindGameTexture(sc.String, ETextureType::Any, FTextureManager::TEXMAN_TryAny);
+					if (!textures[4])
+						Printf("%s '%s' not found in texture '%s'\n", notFound[4], sc.String, tex ? tex->GetName().GetChars() : "(null)");
+				}
+			}
+			else if (sc.Compare("emissive"))
+			{
+				sc.MustGetFloat();
+				emissive = (float)max(sc.Float, 0.);
 			}
 			else if (sc.Compare("speed"))
 			{
@@ -1447,6 +1484,7 @@ class GLDefsParser
 		}
 
 		tex->SetNoMipmap(no_mipmap);
+		if (emissive >= 0) tex->SetEmissive(emissive);
 
 		FGameTexture **bindings[6] =
 		{

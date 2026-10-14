@@ -3,6 +3,10 @@
 #include "mtl_objects.h"
 #include "renderstyle.h"
 #include "vulkan/shaders/vk_shader.h"	// PushConstants, MatricesUBO, StreamUBO: the shader interface is shared
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <set>
 
 class MtlStreamBufferWriter
 {
@@ -67,6 +71,15 @@ struct MtlDepthStencilKey
 
 void MtlSetBlendMode(MTLRenderPipelineColorAttachmentDescriptor *attachment, const FRenderStyle &style);
 
+// Pipelines compiled in the background, handed over on the render thread.
+struct MtlPipelinePrewarm
+{
+	std::mutex Mutex;
+	std::condition_variable Changed;
+	int Pending = 0;
+	std::vector<std::pair<MtlPipelineKey, id<MTLRenderPipelineState>>> Done;
+};
+
 class MtlRenderState : public FRenderState
 {
 public:
@@ -102,6 +115,12 @@ public:
 	void EndRenderPass();
 	void EndFrame();
 
+	// Background pipeline compilation (see mtl_renderstate.mm)
+	struct PrewarmFormats { int flat = -1, sky = -1, particles = -1; };
+	void QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples);
+	void PumpPrewarm(int maxPending);
+	void FinishPrewarm();
+
 private:
 	void Apply(int dt);
 	void BeginRenderPass();
@@ -116,6 +135,7 @@ private:
 	void WaitForStreamBuffers();
 
 	id<MTLRenderPipelineState> GetPipeline(const MtlPipelineKey &key);
+	MTLRenderPipelineDescriptor *CreatePipelineDescriptor(const MtlPipelineKey &key);
 	id<MTLDepthStencilState> GetDepthStencilState(const MtlDepthStencilKey &key);
 
 	MetalRenderDevice *fb = nullptr;
@@ -163,6 +183,9 @@ private:
 	int mLastVertexOffsets[2] = { -1, -1 };
 
 	std::map<MtlPipelineKey, id<MTLRenderPipelineState>> mPipelines;
+	std::set<MtlPipelineKey> mPrewarmRequested;
+	std::deque<MtlPipelineKey> mPrewarmQueue;
+	std::shared_ptr<MtlPipelinePrewarm> mPrewarm = std::make_shared<MtlPipelinePrewarm>();
 	std::map<MtlDepthStencilKey, id<MTLDepthStencilState>> mDepthStencilStates;
 
 	struct RenderTarget

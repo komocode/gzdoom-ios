@@ -43,6 +43,7 @@ class FHWModelRenderer : public FModelRenderer
 	HWDrawInfo *di;
 	FRenderState &state;
 public:
+	float reactive = 0.f;	// TAA reactive mask for every surface of the model
 	FHWModelRenderer(HWDrawInfo *d, FRenderState &st, int mli) : modellightindex(mli), di(d), state(st)
 	{}
 	ModelRendererType GetType() const override { return GLModelRendererType; }

@@ -101,6 +101,8 @@ OpenGLFrameBuffer::~OpenGLFrameBuffer()
 	if (mSkyData != nullptr) delete mSkyData;
 	delete mFXParticleVertices;
 	delete mFXParticleIndices;
+	delete mWeatherVertices;
+	delete mWeatherIndices;
 	if (mViewpoints != nullptr) delete mViewpoints;
 	if (mLights != nullptr) delete mLights;
 	if (mBones != nullptr) delete mBones;

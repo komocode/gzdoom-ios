@@ -287,6 +287,7 @@ void level_info_t::Reset()
 	cdid = 0;
 	gravity = 0.f;
 	aircontrol = 0.f;
+	wetness = puddles = rainripples = 0.f;
 	WarpTrans = 0;
 	airsupply = 20;
 	compatflags = compatflags2 = 0;
@@ -317,6 +318,13 @@ void level_info_t::Reset()
 	thickfogdistance = -1.0f;
 	thickfogmultiplier = 30.0f;
 	pixelstretch = 1.2f;
+	heightfogdensity = 0;
+	heightfogbase = 0;
+	heightfogfalloff = 64;
+	heightfognoise = 0;
+	heightfogcolor = 0x80888c;
+	heightfogwind = { 0, 0 };
+	weather = {};
 
 	specialactions.Clear();
 	DefaultEnvironment = 0;
@@ -330,6 +338,8 @@ void level_info_t::Reset()
 	skyrotatevector2 = FVector3(0, 0, 1);
 	lightblendmode = ELightBlendMode::DEFAULT;
 	tonemap = ETonemapMode::None;
+	gradinglut = "";
+	exposurebias = 0.f;
 }
 
 
@@ -1271,6 +1281,29 @@ DEFINE_MAP_OPTION(aircontrol, true)
 	info->aircontrol = parse.sc.Float;
 }
 
+// Wet surfaces for screen-space reflections. Sectors can raise these with the
+// UDMF 'wetness' and 'puddles' keys.
+DEFINE_MAP_OPTION(wetness, true)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->wetness = clamp((float)parse.sc.Float, 0.f, 1.f);
+}
+
+DEFINE_MAP_OPTION(puddles, true)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->puddles = clamp((float)parse.sc.Float, 0.f, 1.f);
+}
+
+DEFINE_MAP_OPTION(rainripples, true)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->rainripples = clamp((float)parse.sc.Float, 0.f, 1.f);
+}
+
 DEFINE_MAP_OPTION(airsupply, true)
 {
 	parse.ParseAssign();
@@ -1571,6 +1604,92 @@ DEFINE_MAP_OPTION(outsidefogdensity, false)
 	info->outsidefogdensity = clamp(parse.sc.Number, 0, 512) >> 1;
 }
 
+// heightfog = density[, base height[, falloff height]]
+DEFINE_MAP_OPTION(heightfog, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->heightfogdensity = max(parse.sc.Float, 0.);
+	if (parse.CheckFloat())
+	{
+		info->heightfogbase = parse.sc.Float;
+		if (parse.CheckFloat()) info->heightfogfalloff = max(parse.sc.Float, 1.);
+	}
+}
+
+DEFINE_MAP_OPTION(heightfogcolor, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetString();
+	info->heightfogcolor = V_GetColor(parse.sc);
+}
+
+DEFINE_MAP_OPTION(heightfognoise, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->heightfognoise = clamp(parse.sc.Float, 0., 1.);
+}
+
+// Wind that scrolls the height fog noise, in map units per second.
+DEFINE_MAP_OPTION(heightfogwind, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->heightfogwind.X = parse.sc.Float;
+	if (parse.CheckFloat()) info->heightfogwind.Y = parse.sc.Float;
+}
+
+// Visual weather: weather = "rain" | "snow" | "none"
+DEFINE_MAP_OPTION(weather, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetString();
+	if (parse.sc.Compare("rain")) info->weather.Type = WEATHER_Rain;
+	else if (parse.sc.Compare("snow")) info->weather.Type = WEATHER_Snow;
+	else if (parse.sc.Compare("none")) info->weather.Type = WEATHER_None;
+	else parse.sc.ScriptError("Unknown weather type '%s'", parse.sc.String);
+}
+
+DEFINE_MAP_OPTION(weatherdensity, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->weather.Density = (float)clamp(parse.sc.Float, 0., 2.);
+}
+
+// weatherwind = speed, angle (map units per second, direction in degrees)
+DEFINE_MAP_OPTION(weatherwind, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->weather.WindSpeed = (float)parse.sc.Float;
+	parse.ParseComma();
+	parse.sc.MustGetFloat();
+	info->weather.WindAngle = (float)parse.sc.Float;
+}
+
+DEFINE_MAP_OPTION(weatherlength, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->weather.Length = (float)clamp(parse.sc.Float, 0.1, 8.);
+}
+
+DEFINE_MAP_OPTION(weatherspeed, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->weather.FallSpeed = (float)clamp(parse.sc.Float, 0.05, 8.);
+}
+
+DEFINE_MAP_OPTION(weathercolor, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetString();
+	info->weather.Color = V_GetColor(parse.sc) | 0xff000000;
+}
+
 DEFINE_MAP_OPTION(skyfog, false)
 {
 	parse.ParseAssign();
@@ -1664,6 +1783,10 @@ DEFINE_MAP_OPTION(lightblendmode, false)
 			{
 				info->tonemap = ETonemapMode::Reinhard;
 			}
+			else if (parse.sc.Compare("ACES"))
+			{
+				info->tonemap = ETonemapMode::ACES;
+			}
 			else
 			{
 				parse.sc.ScriptMessage("Invalid tonemap %s", parse.sc.String);
@@ -1674,6 +1797,22 @@ DEFINE_MAP_OPTION(lightblendmode, false)
 	{
 		parse.sc.ScriptMessage("Invalid light blend mode %s", parse.sc.String);
 	}
+}
+
+// Colour grading LUT (a 1024x32 strip) and exposure bias in EV for the level.
+// ZScript can change both per area with PPShader.SetGradingLUT / SetExposureBias.
+DEFINE_MAP_OPTION(gradinglut, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetString();
+	info->gradinglut = parse.sc.String;
+}
+
+DEFINE_MAP_OPTION(exposurebias, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->exposurebias = (float)parse.sc.Float;
 }
 
 DEFINE_MAP_OPTION(notexturefill, false)

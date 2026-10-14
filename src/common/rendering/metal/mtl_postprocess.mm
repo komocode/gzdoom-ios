@@ -24,6 +24,11 @@ void MtlPPRenderState::PopGroup()
 {
 }
 
+bool MtlPPRenderState::SupportsRayQuery() const
+{
+	return fb->RaytracingEnabled() && fb->GetRaytrace()->TopLevel;
+}
+
 void MtlPPRenderState::Draw()
 {
 	auto pp = fb->GetPostprocess();
@@ -106,6 +111,20 @@ void MtlPPRenderState::Draw()
 	if (Uniforms.Data.Size() > 0)
 		[encoder setFragmentBytes:Uniforms.Data.Data() length:Uniforms.Data.Size() atIndex:MTLBUF_PP_UNIFORMS];
 
+	// Small per-draw data needs no buffer of its own (Metal allows up to 4 KB).
+	if (StorageData && StorageSize > 0)
+	{
+		assert(StorageSize <= 4096);
+		[encoder setFragmentBytes:StorageData length:std::min(StorageSize, 4096) atIndex:MTLBUF_PP_STORAGE + PP_STORAGE_BINDINGPOINT];
+	}
+
+	if (RayQuery && SupportsRayQuery())
+	{
+		auto raytrace = fb->GetRaytrace();
+		[encoder setFragmentAccelerationStructure:raytrace->TopLevel atBufferIndex:MTLBUF_PP_STORAGE + PP_ACCELERATION_BINDINGPOINT];
+		[encoder useResource:raytrace->BottomLevel usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+	}
+
 	auto vertexBuffer = static_cast<MtlHardwareVertexBuffer*>(screen->mVertexData->GetBufferObjects().first);
 	[encoder setVertexBuffer:vertexBuffer->mBuffer offset:0 atIndex:MTLBUF_PP_VERTEX];
 	[encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:FFlatVertexBuffer::PRESENT_INDEX vertexCount:3];
@@ -176,9 +195,10 @@ void MtlPostprocess::PostProcessScene(int fixedcm, float flash, const std::funct
 
 	MtlPPRenderState renderstate(fb);
 
-	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight);
-	SetActiveRenderTarget();
-	afterBloomDrawEndScene2D();
+	hw_postprocess.Pass1(&renderstate, fixedcm, sceneWidth, sceneHeight, [&]() {
+		SetActiveRenderTarget();
+		afterBloomDrawEndScene2D();
+	});
 	hw_postprocess.Pass2(&renderstate, fixedcm, flash, sceneWidth, sceneHeight);
 }
 
@@ -244,8 +264,10 @@ void MtlPostprocess::DrawPresentTexture(const IntRect &box, bool applyGamma, boo
 		uniforms.Saturation = clamp<float>(vid_saturation, -15.0f, 15.f);
 		uniforms.GrayFormula = static_cast<int>(gl_satformula);
 	}
-	uniforms.ColorScale = (gl_dither_bpc == -1) ? 255.0f : (float)((1 << gl_dither_bpc) - 1);
-	uniforms.HdrMode = 0;
+	// The EDR swapchain is half float: no dither, and the present pass decodes to linear.
+	bool hdr = !screenshot && fb->HdrOutputActive();
+	uniforms.ColorScale = hdr ? 0.0f : (gl_dither_bpc == -1) ? 255.0f : (float)((1 << gl_dither_bpc) - 1);
+	uniforms.HdrMode = hdr ? 2 : 0;
 
 	if (screenshot)
 	{
@@ -279,6 +301,23 @@ void MtlPostprocess::AmbientOccludeScene(float m5)
 
 	MtlPPRenderState renderstate(fb);
 	hw_postprocess.ssao.Render(&renderstate, m5, sceneWidth, sceneHeight);
+
+	// Soft particles read the linear depth during the rest of the scene pass;
+	// the scene render pass restarts after this and rebinds the textures.
+	if (PPAmbientOcclusion::GBufferNeeded())
+	{
+		MtlTextureImage *depth = fb->GetTextureManager()->GetTexture(PPTextureType::PPTexture, hw_postprocess.ssao.GetLinearDepth());
+		fb->GetTextureManager()->SceneDepth = depth ? depth->Texture : nil;
+	}
+}
+
+void MtlPostprocess::ReflectScene(float m5)
+{
+	int sceneWidth = fb->GetBuffers()->GetSceneWidth();
+	int sceneHeight = fb->GetBuffers()->GetSceneHeight();
+
+	MtlPPRenderState renderstate(fb);
+	hw_postprocess.sceneEffects.RenderReflections(&renderstate, m5, sceneWidth, sceneHeight);
 }
 
 void MtlPostprocess::BlurScene(float gameinfobluramount)
@@ -297,10 +336,15 @@ void MtlPostprocess::ClearTonemapPalette()
 
 void MtlPostprocess::UpdateShadowMap()
 {
+	// The light list still assigns the shadow indices that mark lights as
+	// shadowed; traced shadows don't need the 1D maps themselves.
 	if (screen->mShadowMap.PerformUpdate())
 	{
-		MtlPPRenderState renderstate(fb);
-		hw_postprocess.shadowmap.Update(&renderstate);
+		if (!fb->RaytracingEnabled())
+		{
+			MtlPPRenderState renderstate(fb);
+			hw_postprocess.shadowmap.Update(&renderstate);
+		}
 		screen->mShadowMap.FinishUpdate();
 	}
 }

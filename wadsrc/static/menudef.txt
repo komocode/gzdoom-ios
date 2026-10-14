@@ -2993,8 +2993,8 @@ OptionValue "RenderPresets"
 OptionValue "SSRModes"
 {
 	0, "$OPTVAL_OFF"
-	1, "Liquids"
-	2, "Liquids and glossy floors"
+	1, "Liquids and wet surfaces"
+	2, "Also glossy floors"
 }
 
 OptionValue "VolumetricModes"
@@ -3011,6 +3011,13 @@ OptionValue "ParticleModes"
 	2, "Dense"
 }
 
+OptionValue "WeatherModes"
+{
+	0, "$OPTVAL_OFF"
+	1, "Normal"
+	2, "With distant rain"
+}
+
 OptionValue "GIQuality"
 {
 	0, "Fast"
@@ -3023,6 +3030,20 @@ OptionValue "AppleFrameTargets"
 	0, "Device estimate (fidelity)"
 	60, "60 FPS"
 	120, "120 FPS (when supported)"
+}
+
+OptionValue "StaticModelModes"
+{
+	0, "Off"
+	1, "+STATICMESH actors"
+	2, "+ still decorations"
+}
+
+OptionString "GradingLUTs"
+{
+	"", "$OPTVAL_OFF"
+	"LUTNEUTR", "Neutral"
+	"LUTNIGHT", "Cinematic night"
 }
 
 OptionMenu "ModernRenderMenu" protected
@@ -3043,10 +3064,18 @@ OptionMenu "ModernRenderMenu" protected
 	Slider "Indirect light strength",		r_ssgi_strength,		0.0, 3.0, 0.1, 1
 	Option "Volumetric light",				r_volumetric,			"VolumetricModes"
 	Slider "Volumetric strength",			r_volumetric_strength,	0.0, 3.0, 0.1, 1
+	Slider "Shadowed volumetric lights",	r_volumetric_shadows,	0, 16, 1, 0
+	Slider "Volumetric fade distance",		r_volumetric_distance,	1024, 8192, 256, 0
+	Slider "Fog glow around lights",		r_volumetric_fogscatter,	0.0, 3.0, 0.1, 1
+	Option "Height fog",					r_heightfog,			"OnOff"
 	Option "Dynamic light shadows",			gl_light_shadowmap,		"OnOff"
 	Option "Manual ray traced shadows (restart)",	vk_raytrace,		"OnOff"
+	Option "Models in baked GI and traced shadows",	r_staticmodels,	"StaticModelModes"
+	Option "HDR emissive lights",			r_emissive,				"OnOff"
+	Slider "Emissive strength",				r_emissive_strength,	1.0, 8.0, 0.5, 1
 	StaticText " "
 	StaticText "Surfaces", 1
+	Option "Pixel-art texture filtering",	r_pixelart,				"OnOff"
 	Option "Texture relief",				r_autonormal,			"OnOff"
 	Slider "Relief strength",				r_autonormal_strength,	0.0, 3.0, 0.1, 1
 	Option "Specular highlights",			r_specular,				"OnOff"
@@ -3054,14 +3083,26 @@ OptionMenu "ModernRenderMenu" protected
 	Option "Parallax occlusion",			r_parallax,				"OnOff"
 	Option "Screen-space reflections",		r_ssr,					"SSRModes"
 	Slider "Reflection strength",			r_ssr_strength,			0.0, 2.0, 0.1, 1
+	Slider "Reflection streaks",			r_ssr_stretch,			0.0, 6.0, 0.5, 1
 	StaticText " "
 	StaticText "Effects", 1
 	Option "Impact and explosion particles",	r_gpuparticles,			"ParticleModes"
+	Option "Weather (rain, snow)",			r_weather_quality,		"WeatherModes"
+	Option "Soft particles",				r_softparticles,		"OnOff"
 	StaticText " "
 	StaticText "Camera", 1
 	Option "$GLPREFMNU_TONEMAP",			gl_tonemap,				"TonemapModes"
 	Option "Progressive bloom",				r_bloom_modern,			"OnOff"
+	Slider "Bloom threshold",				r_bloom_threshold,		0.25, 4.0, 0.25, 2
+	Option "Weapon blooms (drawn before bloom)",	r_weapon_prebloom,	"OnOff"
+	Slider "Exposure (EV)",					r_exposure,				-2.0, 2.0, 0.25, 2
+	Option "Eye adaptation",				r_autoexposure,			"OnOff"
+	Option "Color grading LUT",				r_grading_lut,			"GradingLUTs"
+	Slider "Grading contrast",				r_grade_contrast,		0.5, 2.0, 0.05, 2
+	Slider "Grading saturation",			r_grade_saturation,		0.0, 2.0, 0.05, 2
 	Option "Temporal anti-aliasing",		r_taa,					"OnOff"
+	Option "Stable moving sprites (TAA mask)",	r_taa_reactive,		"OnOff"
+	Option "Opaque sprites write depth",	r_sprite_depth,			"OnOff"
 	Slider "Temporal upscaling (3D scale)",	r_upscale,				0.5, 1.0, 0.05, 2
 	Slider "Sharpen",						r_sharpen,				0.0, 1.0, 0.05, 2
 	Slider "Vignette",						r_vignette,				0.0, 1.0, 0.05, 2

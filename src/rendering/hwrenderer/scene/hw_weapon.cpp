@@ -47,6 +47,7 @@
 #include "flatvertices.h"
 #include "hw_lightbuffer.h"
 #include "hw_renderstate.h"
+#include "hw_modernrender.h"
 
 #include "vm.h"
 
@@ -94,6 +95,8 @@ void HWDrawInfo::DrawPSprite(HUDSprite *huds, FRenderState &state)
 		state.AlphaFunc(Alpha_GEqual, 0);
 
 		FHWModelRenderer renderer(this, state, huds->lightindex);
+		// HUD models move with the view, so the camera motion doesn't describe them.
+		if (r_taa_reactive) renderer.reactive = 1.f;
 		RenderHUDModel(&renderer, huds->weapon, huds->translation, huds->rotation + FVector3(huds->mx / 4., (huds->my - WEAPONTOP) / -4., 0), huds->pivot, huds->mframe, Net_ModifyObjectFrac(huds->weapon, Viewpoint.TicFrac));
 		state.SetVertexBuffer(screen->mVertexData);
 	}
@@ -104,7 +107,10 @@ void HWDrawInfo::DrawPSprite(HUDSprite *huds, FRenderState &state)
 		FTranslationID trans = huds->weapon->GetTranslation();
 		if ((huds->weapon->Flags & PSPF_PLAYERTRANSLATED)) trans = huds->owner->Translation;
 		state.SetMaterial(huds->texture, UF_Sprite, CTF_Expand, CLAMP_XY_NOMIP, trans, huds->OverrideShader);
+		// Bright (fullbright) frames such as muzzle flashes emit HDR light.
+		state.SetFullbrightEmission(huds->lightlevel >= 255 && !isFullbrightScene());
 		state.Draw(DT_TriangleStrip, huds->mx, 4);
+		state.SetFullbrightEmission(false);
 	}
 
 	state.SetTextureMode(TM_NORMAL);

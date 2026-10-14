@@ -56,6 +56,7 @@
 #include "p_enemy.h"
 #include "gi.h"
 #include "shadowinlines.h"
+#include "hw_gpuparticles.h"
 
 DVector2 AM_GetPosition();
 int Net_GetLatency(int *ld, int *ad);
@@ -2209,6 +2210,42 @@ DEFINE_FIELD_X(FSpawnParticleParams, FSpawnParticleParams, fadeoutstep);
 DEFINE_FIELD_X(FSpawnParticleParams, FSpawnParticleParams, startroll);
 DEFINE_FIELD_X(FSpawnParticleParams, FSpawnParticleParams, rollvel);
 DEFINE_FIELD_X(FSpawnParticleParams, FSpawnParticleParams, rollacc);
+
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, color1);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, color2);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, count);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, shape);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, flags);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, pos);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, spread);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, dir);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, coneAngle);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, speedMin);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, speedMax);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, gravity);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, drag);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, lifeMin);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, lifeMax);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, sizeStart);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, sizeEnd);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, alpha);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, brightness);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, stretch);
+DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, delay);
+
+// Visual-only GPU particles (hw_gpuparticles.h): no game state, no game RNG.
+static void SpawnFXParticles(FLevelLocals *Level, FFXParticleParams *params)
+{
+	FX_SpawnScripted(Level, *params);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SpawnFXParticles, SpawnFXParticles)
+{
+	PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	PARAM_POINTER(p, FFXParticleParams);
+	SpawnFXParticles(self, p);
+	return 0;
+}
 
 static void SpawnParticle(FLevelLocals *Level, FSpawnParticleParams *params)
 {

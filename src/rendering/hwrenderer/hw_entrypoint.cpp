@@ -30,6 +30,8 @@
 #include "a_dynlight.h"
 #include <algorithm>
 #include "hw_irradiance.h"
+#include "doom_levelmesh.h"
+#include "hw_weather.h"
 #include "gi.h"
 #include "a_dynlight.h"
 #include "m_png.h"
@@ -76,12 +78,16 @@ void CollectLights(FLevelLocals* Level)
 {
 	IShadowMap* sm = &screen->mShadowMap;
 	int lightindex = 0;
+	// The 1D shadow maps only help lights that reach past a one-sided wall. Traced
+	// shadows also come from 3D floors, masked mid textures and models, so every
+	// light that allows shadows gets them.
+	bool traced = screen->RaytracedShadowsActive();
 
 	// Todo: this should go through the blockmap in a spiral pattern around the player so that closer lights are preferred.
 	for (auto light = Level->lights; light; light = light->next)
 	{
 		IShadowMap::LightsProcessed++;
-		if (light->shadowmapped && light->IsActive() && lightindex < 1024)
+		if ((light->shadowmapped || (traced && !light->DontShadowmap())) && light->IsActive() && lightindex < 1024)
 		{
 			IShadowMap::LightsShadowmapped++;
 
@@ -102,64 +108,6 @@ void CollectLights(FLevelLocals* Level)
 	}
 }
 
-
-//-----------------------------------------------------------------------------
-//
-// Picks the dynamic lights that contribute the most visible light scattering
-// and hands them to the volumetric pass in view space.
-//
-//-----------------------------------------------------------------------------
-
-static void CollectVolumetricLights(HWDrawInfo *di)
-{
-	if (r_volumetric <= 0 || !di->Level->HasDynamicLights)
-	{
-		hw_postprocess.sceneEffects.SetVolumetricLights(nullptr, 0);
-		return;
-	}
-
-	struct Candidate { float score; FVector4 pos; FVector4 color; };
-	TArray<Candidate> candidates;
-	auto &vp = di->Viewpoint;
-	DVector3 camera = vp.Pos;
-	DVector3 forward(vp.Angles.Yaw.Cos() * vp.Angles.Pitch.Cos(), vp.Angles.Yaw.Sin() * vp.Angles.Pitch.Cos(), -vp.Angles.Pitch.Sin());
-	VSMatrix &view = di->VPUniforms.mViewMatrix;
-
-	for (FDynamicLight *light = di->Level->lights; light; light = light->next)
-	{
-		if (!light->IsActive() || light->IsSubtractive() || !light->visibletoplayer) continue;
-		float radius = light->GetRadius();
-		if (radius <= 0) continue;
-		DVector3 delta = light->Pos - camera;
-		double dist = delta.Length();
-		if (dist > 2048.0 + radius) continue;
-		if ((delta | forward) < -radius) continue; // behind the camera
-		float r = light->GetRed() / 255.f, g = light->GetGreen() / 255.f, b = light->GetBlue() / 255.f;
-		float brightness = std::max({ r, g, b });
-		if (brightness <= 0.02f) continue;
-
-		// Doom space (x, y, height) to GL world space (x, height, y), then view space.
-		float world[4] = { (float)light->X(), (float)light->Z(), (float)light->Y(), 1.0f };
-		float eye[4];
-		view.multMatrixPoint(world, eye);
-
-		Candidate c;
-		c.score = brightness * radius / float(dist + 64.0);
-		c.pos = { eye[0], eye[1], -eye[2], radius };
-		c.color = { r, g, b, radius * 0.18f };
-		candidates.Push(c);
-	}
-
-	std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
-	FVector4 data[MaxVolumetricLights * 2];
-	int count = std::min((int)candidates.Size(), (int)MaxVolumetricLights);
-	for (int i = 0; i < count; i++)
-	{
-		data[i * 2] = candidates[i].pos;
-		data[i * 2 + 1] = candidates[i].color;
-	}
-	hw_postprocess.sceneEffects.SetVolumetricLights(data, count);
-}
 
 //-----------------------------------------------------------------------------
 //
@@ -188,8 +136,14 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 		screen->mShadowMap.SetCollectLights(nullptr);
 	}
 
+	if (mainview && toscreen && (r_gi || screen->RaytracedShadowsActive()))
+		DoomLevelMesh::Update(camera->Level, screen->RaytracedShadowsActive());
 	screen->SetLevelMesh(camera->Level->levelMesh);
-	if (mainview && toscreen) GI_Update(camera->Level);
+	if (mainview && toscreen)
+	{
+		GI_Update(camera->Level);
+		Weather_Update(camera->Level);
+	}
 
 	// Update the attenuation flag of all light defaults for each viewpoint.
 	// This function will only do something if the setting differs.
@@ -252,7 +206,6 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 		// Stereo mode specific viewpoint adjustment
 		vp.Pos += eye.GetViewShift(vp.HWAngles.Yaw.Degrees());
 		di->SetupView(RenderState, vp.Pos.X, vp.Pos.Y, vp.Pos.Z, false, false);
-		if (mainview) CollectVolumetricLights(di);
 		if (temporal) hw_postprocess.taa.SetCamera(unjittered, di->VPUniforms.mViewMatrix, vp.Pos);
 
 		di->ProcessScene(toscreen);
@@ -413,6 +366,7 @@ sector_t* RenderView(player_t* player)
 		screen->mVertexData->Reset();
 	}
 	hw_postprocess.SetTonemapMode(level.info ? level.info->tonemap : ETonemapMode::None);
+	if (level.info) hw_postprocess.grading.SetLevel(level.MapName, level.info->gradinglut, level.info->exposurebias);
 
 	sector_t* retsec;
 	if (!V_IsHardwareRenderer())

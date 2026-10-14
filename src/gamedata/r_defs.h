@@ -716,6 +716,8 @@ struct sector_t
 	// GL only stuff starts here
 	int							subsectorcount;		// list of subsectors
 	float						reflect[2];
+	float						wetness;			// screen-space reflections: wet floor and walls (0-1)
+	float						puddles;			// screen-space reflections: puddle coverage on the floor (0-1)
 	double						transdoorheight;	// for transparent door hacks
 	subsector_t **				subsectors;
 	FSectorPortalGroup *		portals[2];			// floor and ceiling portals
@@ -1740,7 +1742,8 @@ enum SurfaceType
 	ST_UPPERWALL,
 	ST_LOWERWALL,
 	ST_CEILING,
-	ST_FLOOR
+	ST_FLOOR,
+	ST_MODEL	// level mesh only: static model geometry
 };
 
 struct LightmapSurface

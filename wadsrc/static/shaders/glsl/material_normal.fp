@@ -92,6 +92,18 @@ void modernLightContribution(int i, vec3 geomNormal, vec3 normal, vec3 viewdir, 
 	{
 		// Normalized Blinn-Phong.
 		vec3 halfdir = normalize(lightdir + viewdir);
+		if (gWetness > 0.0)
+		{
+			// Wet surfaces stretch highlights toward the viewer: widen the lobe
+			// along the view direction projected onto the surface.
+			vec3 t = viewdir - normal * dot(viewdir, normal);
+			float tl = length(t);
+			if (tl > 1e-3)
+			{
+				t /= tl;
+				halfdir = normalize(halfdir - t * dot(halfdir, t) * (0.65 * gWetness));
+			}
+		}
 		float spec = pow(max(dot(normal, halfdir), 0.0), shininess) * (shininess + 8.0) * (1.0 / 25.1327);
 		result.specular += radiance * spec * clamp(geomdot * 4.0, 0.0, 1.0);
 	}
@@ -129,6 +141,9 @@ vec3 ProcessModernMaterialLight(Material material, vec3 color)
 			float metallic = smoothstep(0.3, 0.6, lum) * (1.0 - smoothstep(0.25, 0.55, sat));
 			specTint = mix(vec3(1.0), base / max(max(max(base.r, base.g), base.b), 0.05), metallic);
 			specLevel *= 1.0 + 0.5 * metallic;
+			// Water film: strong, tight highlights.
+			specLevel = mix(specLevel, max(specLevel, 0.8 * uSpecularStrength), gWetness);
+			shininess = mix(shininess, max(shininess, 140.0), gWetness);
 		}
 
 		ModernLight result;
@@ -160,7 +175,9 @@ vec3 ProcessModernMaterialLight(Material material, vec3 color)
 			additive.specular = vec3(0.0);
 			for (int i = lightRange.z; i < lightRange.w; i += 4)
 				modernLightContribution(i, geomNormal, normal, viewdir, shininess, additive, 1.0);
-			frag = clamp(frag + desaturate(vec4(additive.diffuse, 0.0)).rgb, 0.0, 1.0);
+			// With HDR emission, additive lights may push surfaces past white.
+			frag += desaturate(vec4(additive.diffuse, 0.0)).rgb;
+			frag = HasFeature(RF_HDR_EMISSIVE) ? max(frag, vec3(0.0)) : clamp(frag, 0.0, 1.0);
 			result.specular += additive.specular;
 		}
 

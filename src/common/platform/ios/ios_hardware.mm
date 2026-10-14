@@ -56,15 +56,18 @@ void IOS_UpdateHardware()
     gl_bloom = settings.bloom;
     gl_texture_filter_anisotropic = settings.anisotropy;
     vid_scalemode = 0;
+    bool linear = !r_pixelart;
     if (height > 0)
     {
         // With TAA the scene renders at maxRenderHeight and is upscaled to a
         // sharper output; otherwise the output is the render resolution.
         float output = std::min(float(height), settings.maxRenderHeight * settings.outputScale);
-        vid_scalefactor = output / height;
+        auto presentation = IOSHardware::SelectPresentation(output / height, r_pixelart);
+        vid_scalefactor = presentation.outputScale;
+        linear = presentation.linear;
         r_upscale = std::clamp(settings.maxRenderHeight / output, 0.5f, 1.f);
     }
-    vid_scale_linear = true;
+    vid_scale_linear = linear;
     lastThermal = state;
     lastLowPower = low;
     lastHeight = height;

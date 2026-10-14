@@ -144,6 +144,8 @@ public:
 	FFlatVertexBuffer *mVertexData = nullptr;	// Global vertex data
 	IVertexBuffer *mFXParticleVertices = nullptr;	// visual-only GPU particles (hw_gpuparticles.cpp)
 	IIndexBuffer *mFXParticleIndices = nullptr;
+	IVertexBuffer *mWeatherVertices = nullptr;		// procedural weather drops (hw_weather.cpp)
+	IIndexBuffer *mWeatherIndices = nullptr;
 	HWViewpointBuffer *mViewpoints = nullptr;	// Viewpoint render data.
 	FLightBuffer *mLights = nullptr;			// Dynamic lights
 	BoneBuffer* mBones = nullptr;				// Model bones
@@ -172,6 +174,8 @@ public:
 		mShadowMap.SetAABBTree(tree);
 	}
 	virtual void SetLevelMesh(hwrenderer::LevelMesh *mesh) { }
+	// True while the scene shaders trace shadow rays against the level mesh.
+	virtual bool RaytracedShadowsActive() { return false; }
 	bool allowSSBO() const
 	{
 #ifndef HW_BLOCK_SSBO
@@ -238,13 +242,22 @@ public:
 
 	virtual void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t>& LMTextureData) {}
 	virtual void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData) {}
+	// Sky exposure map for weather (RGBA16F, one array layer). Returns false when the backend can't bind it.
+	virtual bool InitWeatherMap(int width, int height, TArray<uint16_t>& rgbaHalfData) { return false; }
+	// True when the scene shaders can read the half-resolution linear depth from
+	// AmbientOccludeScene during the rest of the main view (soft particles).
+	virtual bool SceneDepthReadable() { return false; }
 
 	// Temporal upscaling by the platform (MetalFX on the Metal renderer). The
 	// inputs are render-resolution postprocess textures: HDR color, device depth
 	// and motion (previous minus current position, in UV units). jitter is this
 	// frame's projection offset in input pixels.
 	virtual bool SupportsPlatformUpscaler() { return false; }
-	virtual bool PlatformTemporalUpscale(class PPTexture *color, class PPTexture *depth, class PPTexture *motion, class PPTexture *output, float jitterX, float jitterY, bool reset) { return false; }
+	// reactive (may be null): per-pixel 0..1 mask of how much to distrust the history.
+	virtual bool PlatformTemporalUpscale(class PPTexture *color, class PPTexture *depth, class PPTexture *motion, class PPTexture *reactive, class PPTexture *output, float jitterX, float jitterY, bool reset) { return false; }
+	// Extended dynamic range output: how far above SDR white the display can go
+	// this frame (1 = SDR). The tone mapper rolls highlights off to this value.
+	virtual float GetHdrHeadroom() { return 1.f; }
 
     // Interface to hardware rendering resources
 	virtual IVertexBuffer *CreateVertexBuffer() { return nullptr; }
@@ -263,6 +276,7 @@ public:
 	virtual int Backend() { return 0; }
 	virtual const char* DeviceName() const { return "Unknown"; }
 	virtual void AmbientOccludeScene(float m5) {}
+	virtual void ReflectScene(float m5) {}
 	virtual void FirstEye() {}
 	virtual void NextEye(int eyecount) {}
 	virtual void SetSceneRenderTarget(bool useSSAO) {}

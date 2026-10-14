@@ -25,6 +25,7 @@
 #include "vulkan/system/vk_renderdevice.h"
 #include "vulkan/system/vk_commandbuffer.h"
 #include <zvulkan/vulkanswapchain.h>
+#include <zvulkan/vulkanbuilders.h>
 #include "vulkan/system/vk_buffer.h"
 #include "vulkan/shaders/vk_ppshader.h"
 #include "vulkan/textures/vk_pptexture.h"
@@ -61,6 +62,7 @@ void VkPPRenderState::Draw()
 	key.Shader = fb->GetShaderManager()->GetVkShader(Shader);
 	key.SwapChain = (Output.Type == PPTextureType::SwapChain);
 	key.ShadowMapBuffers = ShadowMapBuffers;
+	key.StorageBuffer = StorageData && StorageSize > 0;
 	if (Output.Type == PPTextureType::PPTexture)
 		key.OutputFormat = fb->GetTextureManager()->GetTextureFormat(Output.Texture);
 	else if (Output.Type == PPTextureType::SwapChain)
@@ -83,8 +85,22 @@ void VkPPRenderState::Draw()
 
 	auto passSetup = fb->GetRenderPassManager()->GetPPRenderPass(key);
 
+	// Per-draw storage data gets a host visible buffer that lives until the frame is done.
+	std::unique_ptr<VulkanBuffer> storage;
+	if (key.StorageBuffer)
+	{
+		storage = BufferBuilder()
+			.Size(StorageSize)
+			.Usage(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU)
+			.DebugName("VkPPRenderState.Storage")
+			.Create(fb->device.get());
+		memcpy(storage->Map(0, StorageSize), StorageData, StorageSize);
+		storage->Unmap();
+	}
+
 	int framebufferWidth = 0, framebufferHeight = 0;
-	VulkanDescriptorSet *input = fb->GetDescriptorSetManager()->GetInput(passSetup, Textures, ShadowMapBuffers);
+	VulkanDescriptorSet *input = fb->GetDescriptorSetManager()->GetInput(passSetup, Textures, ShadowMapBuffers, storage.get());
+	fb->GetCommands()->DrawDeleteList->Add(std::move(storage));
 	VulkanFramebuffer *output = fb->GetBuffers()->GetOutput(passSetup, Output, key.StencilTest, framebufferWidth, framebufferHeight);
 
 	RenderScreenQuad(passSetup, input, output, framebufferWidth, framebufferHeight, Viewport.left, Viewport.top, Viewport.width, Viewport.height, Uniforms.Data.Data(), Uniforms.Data.Size(), key.StencilTest == WhichDepthStencil::Scene);

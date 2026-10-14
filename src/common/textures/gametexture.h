@@ -39,6 +39,8 @@ struct MaterialLayers
 {
 	float Glossiness;
 	float SpecularLevel;
+	float Reflectivity = -1;	// negative: not set
+	float ReflectRoughness = -1;
 	FGameTexture* Brightmap;
 	FGameTexture* Normal;
 	FGameTexture* Specular;
@@ -107,6 +109,9 @@ class FGameTexture
 	FVector2 detailScale = { 1.f, 1.f };
 	float Glossiness = 10.f;
 	float SpecularLevel = 0.1f;
+	float Reflectivity = -1.f;	// screen-space reflection strength from GLDEFS; negative uses the defaults
+	float ReflectRoughness = -1.f;	// reflection blur from GLDEFS; negative estimates it from the texture
+	float Emissive = 1.f;	// HDR emission strength of the brightmap / fullbright texels
 	float shaderspeed = 1.f;
 	int shaderindex = 0;
 
@@ -218,6 +223,8 @@ public:
 		// Only update layers that have something defind.
 		if (lay.Glossiness > -1000) Glossiness = lay.Glossiness;
 		if (lay.SpecularLevel > -1000) SpecularLevel = lay.SpecularLevel;
+		if (lay.Reflectivity >= 0) Reflectivity = lay.Reflectivity;
+		if (lay.ReflectRoughness >= 0) ReflectRoughness = lay.ReflectRoughness;
 		if (lay.Brightmap) Brightmap = lay.Brightmap->GetTexture();
 
 		bool needlayers = (lay.Normal || lay.Specular || lay.Metallic || lay.Roughness || lay.AmbientOcclusion);
@@ -242,6 +249,10 @@ public:
 	}
 	float GetGlossiness() const { return Glossiness; }
 	float GetSpecularLevel() const { return SpecularLevel; }
+	float GetReflectivity() const { return Reflectivity; }
+	float GetReflectRoughness() const { return ReflectRoughness; }
+	float GetEmissive() const { return Emissive; }
+	void SetEmissive(float e) { Emissive = e; }
 
 	void CopySize(FGameTexture* BaseTexture, bool forfont = false)
 	{

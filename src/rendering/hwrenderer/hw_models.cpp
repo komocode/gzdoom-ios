@@ -72,6 +72,7 @@ void FHWModelRenderer::BeginDrawModel(FRenderStyle style, int smf_flags, const V
 
 void FHWModelRenderer::EndDrawModel(FRenderStyle style, int smf_flags)
 {
+	state.SetMaterialParams(0, 0);
 	state.SetBoneIndexBase(-1);
 	state.EnableModelMatrix(false);
 	state.SetDepthFunc(DF_Less);
@@ -98,6 +99,7 @@ void FHWModelRenderer::BeginDrawHUDModel(FRenderStyle style, const VSMatrix &obj
 
 void FHWModelRenderer::EndDrawHUDModel(FRenderStyle style, int smf_flags)
 {
+	state.SetMaterialParams(0, 0);
 	state.SetBoneIndexBase(-1);
 	state.EnableModelMatrix(false);
 
@@ -119,7 +121,12 @@ void FHWModelRenderer::SetInterpolation(double inter)
 void FHWModelRenderer::SetMaterial(FGameTexture *skin, bool clampNoFilter, FTranslationID translation)
 {
 	state.SetMaterial(skin, UF_Skin, 0, clampNoFilter ? CLAMP_NOFILTER : CLAMP_NONE, translation, -1);
+	state.SetReactive(reactive);
 	state.SetLightIndex(modellightindex);
+	// Skins with a GLDEFS reflectivity show up in screen-space reflections.
+	float reflectivity = skin && skin->GetReflectivity() > 0 ? skin->GetReflectivity() : 0.f;
+	float gloss = skin && skin->GetReflectRoughness() >= 0 ? 1.f - skin->GetReflectRoughness() : 0.f;
+	state.SetMaterialParams(reflectivity, gloss);
 }
 
 void FHWModelRenderer::DrawArrays(int start, int count)

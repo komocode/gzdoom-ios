@@ -42,6 +42,7 @@
 #include "actor.h"
 #include "d_player.h"
 #include "p_effect.h"
+#include "hw_gpuparticles.h"
 #include "gi.h"
 #include "p_terrain.h"
 #include "gstrings.h"
@@ -395,6 +396,9 @@ static FFlagDef ActorFlagDefs[]=
 	DEFINE_FLAG(RF2, ANGLEDROLL, AActor, renderflags2),
 	DEFINE_FLAG(RF2, INTERPOLATESCALE, AActor, renderflags2),
 	DEFINE_FLAG(RF2, INTERPOLATEALPHA, AActor, renderflags2),
+	DEFINE_FLAG(RF2, STATICMESH, AActor, renderflags2),
+	DEFINE_FLAG(RF2, NOSTATICMESH, AActor, renderflags2),
+	DEFINE_FLAG(RF2, SOFTPARTICLE, AActor, renderflags2),
 
 	// Bounce flags
 	DEFINE_FLAG2(BOUNCE_Walls, BOUNCEONWALLS, AActor, BounceFlags),
@@ -865,6 +869,10 @@ void InitThingdef()
 	auto fspp = NewStruct("FSpawnParticleParams", nullptr);
 	fspp->Size = sizeof(FSpawnParticleParams);
 	fspp->Align = alignof(FSpawnParticleParams);
+
+	auto ffxp = NewStruct("FXParticleParams", nullptr);
+	ffxp->Size = sizeof(FFXParticleParams);
+	ffxp->Align = alignof(FFXParticleParams);
 
 	auto cvst = NewStruct("CVar", nullptr, true);
 	NewPointer(cvst, false)->InstallHandlers(

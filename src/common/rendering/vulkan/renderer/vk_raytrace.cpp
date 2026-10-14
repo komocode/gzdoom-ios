@@ -41,20 +41,24 @@ VkRaytrace::VkRaytrace(VulkanRenderDevice* fb) : fb(fb)
 	NullMesh.MeshVertices.Push({ -1.0f,  1.0f,  1.0f });
 	NullMesh.MeshVertices.Push({ 1.0f,  1.0f,  1.0f });
 	for (int i = 0; i < 3 * 4; i++)
+	{
 		NullMesh.MeshElements.Push(i);
+		NullMesh.ShadowElements.Push(i);
+	}
 
 	SetLevelMesh(nullptr);
 }
 
 void VkRaytrace::SetLevelMesh(hwrenderer::LevelMesh* mesh)
 {
-	if (!mesh)
+	if (!mesh || mesh->ShadowElements.Size() < 3)
 		mesh = &NullMesh;
 
-	if (mesh != Mesh)
+	if (mesh != Mesh || mesh->Generation != MeshGeneration)
 	{
 		Reset();
 		Mesh = mesh;
+		MeshGeneration = mesh->Generation;
 		if (fb->RaytracingEnabled())
 		{
 			CreateVulkanObjects();
@@ -90,7 +94,7 @@ void VkRaytrace::CreateVertexAndIndexBuffers()
 	static_assert(sizeof(FVector3) == 3 * 4, "sizeof(FVector3) is not 12 bytes!");
 
 	size_t vertexbuffersize = (size_t)Mesh->MeshVertices.Size() * sizeof(FVector3);
-	size_t indexbuffersize = (size_t)Mesh->MeshElements.Size() * sizeof(uint32_t);
+	size_t indexbuffersize = (size_t)Mesh->ShadowElements.Size() * sizeof(uint32_t);
 	size_t transferbuffersize = vertexbuffersize + indexbuffersize;
 	size_t vertexoffset = 0;
 	size_t indexoffset = vertexoffset + vertexbuffersize;
@@ -103,7 +107,7 @@ void VkRaytrace::CreateVertexAndIndexBuffers()
 
 	uint8_t* data = (uint8_t*)transferBuffer->Map(0, transferbuffersize);
 	memcpy(data + vertexoffset, Mesh->MeshVertices.Data(), vertexbuffersize);
-	memcpy(data + indexoffset, Mesh->MeshElements.Data(), indexbuffersize);
+	memcpy(data + indexoffset, Mesh->ShadowElements.Data(), indexbuffersize);
 	transferBuffer->Unmap();
 
 	vertexBuffer = BufferBuilder()
@@ -159,7 +163,7 @@ void VkRaytrace::CreateBottomLevelAccelerationStructure()
 	buildInfo.geometryCount = 1;
 	buildInfo.ppGeometries = geometries;
 
-	uint32_t maxPrimitiveCount = Mesh->MeshElements.Size() / 3;
+	uint32_t maxPrimitiveCount = Mesh->ShadowElements.Size() / 3;
 
 	VkAccelerationStructureBuildSizesInfoKHR sizeInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
 	vkGetAccelerationStructureBuildSizesKHR(fb->device->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &maxPrimitiveCount, &sizeInfo);

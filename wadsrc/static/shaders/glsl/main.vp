@@ -36,28 +36,88 @@ struct BonesResult
 BonesResult ApplyBones();
 
 #ifndef SIMPLE
-// GPU particles (hw_gpuparticles.cpp). Every attribute is constant for the
-// particle's lifetime and the motion is evaluated in closed form:
-//   aPosition = start position, start time    aNormal   = velocity, gravity
-//   aVertex2  = life, start size, end size, drag
-//   aLightmap = brightness (< 0: alpha blended), floor height, streak time
-//   aTexCoord = quad corner + 2 * shape
-//   aNormal2  = plane of the surface it came from (normal, distance), faded against
-void ParticleVertex()
+// Sky exposure map (hw_weather.h): one texel per cell of the map seen from above.
+// r = height where rain stops (the highest floor or 3D floor under the sky),
+// g = sky ceiling height, b = sector light level, a = 1 when the sky is above.
+vec4 WeatherCell(vec2 mapPos)
 {
-	float shape = floor(aTexCoord.x * 0.5);
-	vec2 corner = vec2(aTexCoord.x - 2.0 * shape, aTexCoord.y) * 2.0 - 1.0;
-	float age = uMaterialParams.w - aPosition.w;
-	float life = aVertex2.x;
-	bool additive = aLightmap.x >= 0.0;
+	if (uWeatherMap.w <= 0.0) return vec4(0.0);
+	ivec2 cell = ivec2(floor((mapPos - uWeatherMap.xy) * uWeatherMap.z));
+	if (cell.x < 0 || cell.y < 0 || cell.x >= int(uWeatherMap.w) || cell.y >= int(uWeatherParams.x)) return vec4(0.0);
+	return texelFetch(WeatherMap, ivec3(cell, 0), 0);
+}
 
-	vTexCoord = vec4(corner, fract(sin(dot(aPosition.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453), shape);
+// 1 where a point (x, height, y) is under open sky, else 0.
+float WeatherExposure(vec3 pos)
+{
+	vec4 cell = WeatherCell(pos.xz);
+	return cell.a * step(cell.r - 2.0, pos.y);
+}
+
+// Average of the irradiance probe's ambient cube at a point (nearest layer).
+vec3 ParticleIrradiance(vec3 pos)
+{
+	vec3 p = (pos.xzy - uGIOrigin.xyz) / uGIOrigin.w;
+	vec2 uv = (p.xy + 0.5) / uGISize.xy;
+	float z = floor(clamp(p.z, 0.0, uGISize.z - 1.0) + 0.5);
+	vec3 sum = vec3(0.0);
+	for (int f = 0; f < 6; f++) sum += textureLod(IrradianceVolume, vec3(uv, float(f) * uGISize.z + z), 0.0).rgb;
+	return sum * (1.0 / 6.0);
+}
+
+// Dynamic lights of the per-frame particle light list (no shadows).
+vec3 ParticleDynamicLight(vec3 pos)
+{
+	vec3 sum = vec3(0.0);
+	if (uLightIndex >= 0)
+	{
+		ivec4 lightRange = ivec4(lights[uLightIndex]) + ivec4(uLightIndex + 1);
+		for (int i = lightRange.x; i < lightRange.w; i += 4)
+		{
+			if (i >= lightRange.y && i < lightRange.z) continue; // subtractive lights
+			vec4 lightpos = lights[i];
+			vec4 lightcolor = lights[i + 1];
+			vec4 lightspot1 = lights[i + 2];
+			vec4 lightspot2 = lights[i + 3];
+			float d = distance(lightpos.xyz, pos);
+			float attenuation = clamp((lightpos.w - d) / lightpos.w, 0.0, 1.0);
+			if (lightspot1.w == 1.0)
+				attenuation *= smoothstep(lightspot2.y, lightspot2.x, dot((lightpos.xyz - pos) / max(d, 0.001), lightspot1.xyz));
+			sum += lightcolor.rgb * attenuation;
+		}
+	}
+	return sum;
+}
+
+// Light reaching a non-emissive particle: Doom's sector light (base), raised
+// and tinted by the baked GI like scene surfaces, plus nearby dynamic lights
+// and the lightning flash where the sky is open.
+vec3 ParticleLighting(vec3 pos, float base, float dynamicScale)
+{
+	vec3 light = vec3(base);
+	if ((uRenderFeatures & 8) != 0 && uGISize.w > 0.0) // RF_IRRADIANCE
+	{
+		vec3 gi = ParticleIrradiance(pos) * uGIStrength;
+		float lum = dot(gi, vec3(0.2126, 0.7152, 0.0722));
+		float level = base + max(min(lum, 1.0) - base, 0.0) * 0.45;
+		vec3 tint = mix(vec3(1.0), gi / max(lum, 0.001), uGISaturation * smoothstep(0.0, 0.1, lum));
+		tint /= max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+		light = level * tint;
+	}
+	light += ParticleDynamicLight(pos) * dynamicScale;
+	if (uWeatherParams.y > 0.0) light += uWeatherParams.y * WeatherExposure(pos) * vec3(0.8, 0.85, 1.0);
+	return light;
+}
+
+void ParticleDefaults()
+{
 	vColor = vec4(0.0);
 	vLightmap = vec3(0.0);
-	glowdist = vec3(0.0);
+	glowdist = vec3(-1.0e6, 1.0, 0.0);
 	gradientdist = vec3(0.0);
-	vWorldNormal = vec4(0.0, 1.0, 0.0, 1.0);
+	vWorldNormal = vec4(0.0, 0.0, 0.0, -1.0e6); // no source surface to fade against
 	vEyeNormal = vec4(0.0, 0.0, 1.0, 1.0);
+	pixelpos = vec4(0.0);
 
 	#ifdef NO_CLIPDISTANCE_SUPPORT
 	ClipDistanceA = vec4(1.0);
@@ -69,11 +129,39 @@ void ParticleVertex()
 	gl_ClipDistance[3] = 1.0;
 	gl_ClipDistance[4] = 1.0;
 	#endif
+}
+
+void ParticleOutput(vec4 eye)
+{
+	gl_Position = ProjectionMatrix * eye;
+	#ifdef VULKAN_COORDINATE_SYSTEM
+	gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0;
+	#endif
+}
+
+// GPU particles (hw_gpuparticles.cpp). Every attribute is constant for the
+// particle's lifetime and the motion is evaluated in closed form:
+//   aPosition = start position, start time    aNormal   = velocity, gravity
+//   aVertex2  = life, start size, end size, drag
+//   aLightmap = brightness (< 0: alpha blended), floor height, streak time
+//   aTexCoord = quad corner + 2 * (shape + 16 * flags); flag 1 = unlit
+//   aNormal2  = plane of the surface it came from (normal, distance), faded against
+void ParticleVertex()
+{
+	float code = floor(aTexCoord.x * 0.5);
+	vec2 corner = vec2(aTexCoord.x - 2.0 * code, aTexCoord.y) * 2.0 - 1.0;
+	float shape = mod(code, 16.0);
+	float flags = floor(code / 16.0);
+	float age = uMaterialParams.w - aPosition.w;
+	float life = aVertex2.x;
+	bool additive = aLightmap.x >= 0.0;
+
+	ParticleDefaults();
+	vTexCoord = vec4(corner, fract(sin(dot(aPosition.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453), shape);
 
 	if (age < 0.0 || age >= life || additive != (uMaterialParams.z > 0.5))
 	{
 		gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside the view volume: the quad is clipped away
-		pixelpos = vec4(0.0);
 		return;
 	}
 
@@ -117,17 +205,172 @@ void ParticleVertex()
 	glowdist = vec3(aLightmap.y, max(size * 0.6, 0.5), 0.0);
 
 	// Fade in over a frame, out over the lifetime (solid chips, casings and
-	// droplets only at the end), and away close to the camera.
-	float fadeOut = shape >= 2.0 ? 1.0 - smoothstep(0.75, 1.0, t) : pow(1.0 - t, shape == 1.0 ? 1.0 : 1.5);
+	// droplets only at the end; motes swell and fade), and away close to the camera.
+	float fadeOut = (shape >= 2.0 && shape < 4.0) ? 1.0 - smoothstep(0.75, 1.0, t) : pow(1.0 - t, shape == 1.0 ? 1.0 : 1.5);
+	if (shape == 5.0) fadeOut = sin(t * 3.1415927);
 	float fade = min(age * 30.0, 1.0) * fadeOut;
 	fade *= clamp((-eye.z - 4.0) / 24.0, 0.0, 1.0);
-	vColor = vec4(aColor.rgb * abs(aLightmap.x), aColor.a * fade);
+
+	// Emissive particles keep their colour. The others are lit where they are
+	// now; |brightness| is the sector light where they were spawned.
+	vec3 rgb = aColor.rgb * abs(aLightmap.x);
+	if (!additive && mod(flags, 2.0) < 1.0) rgb = aColor.rgb * ParticleLighting(pos, abs(aLightmap.x), 1.0);
+	vColor = vec4(rgb, aColor.a * fade);
 
 	pixelpos = vec4(pos + worldOffset, -eye.z);
-	gl_Position = ProjectionMatrix * eye;
-	#ifdef VULKAN_COORDINATE_SYSTEM
-	gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0;
-	#endif
+	ParticleOutput(eye);
+}
+
+uint WeatherHash(uint x)
+{
+	x ^= x >> 16;
+	x *= 0x7feb352du;
+	x ^= x >> 15;
+	x *= 0x846ca68bu;
+	x ^= x >> 16;
+	return x;
+}
+
+float WeatherRandom(uint x)
+{
+	return float(WeatherHash(x) >> 8) * (1.0 / 16777216.0);
+}
+
+// Weather (hw_weather.cpp): a fixed set of drops, flakes and splashes around
+// the camera, computed from the vertex's index and the time alone. Each layer
+// is a world-space lattice that wraps around the camera, so drops stay put in
+// the world while the camera moves, and the CPU does no per-drop work.
+//   aPosition = drop index, quad corner, kind (0-2 drop layers, 3 ripple, 4 splash)
+//   uMaterialParams.z = 2 rain, 3 snow; w = time
+//   uParticleParams = wind x, wind y, fall speed, streak length or flake size
+//   uParticleParams2 = active fraction, brightness, drop width, soft fade distance
+//   vLightmap.x (to the fragment shader) = soft fade distance scale
+//   uDynLightColor = tint
+void WeatherVertex()
+{
+	ParticleDefaults();
+	float time = uMaterialParams.w;
+	bool snow = uMaterialParams.z > 2.5;
+	int corner = int(aPosition.y);
+	int kind = int(aPosition.z);
+	vec2 c = vec2(float(corner & 1), float(corner >> 1)) * 2.0 - 1.0;
+	uint seed = uint(aPosition.x) * 8u + uint(kind) * 0x9E3779B1u;
+	vec3 cam = uCameraPos.xyz;
+	vec3 wind = vec3(uParticleParams.x, 0.0, uParticleParams.y);
+	float density = uParticleParams2.x;
+	vTexCoord = vec4(c, WeatherRandom(seed + 5u), 8.0);
+	vLightmap.x = 1.0; // scales the soft fade distance; splashes sit on the ground and must not fade into it
+	gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // culled unless set below
+
+	vec3 center;
+	vec4 eye;
+	float alpha;
+	vec4 cell;
+	if (kind < 3)
+	{
+		if (WeatherRandom(seed + 3u) >= density) return;
+		float boxW = kind == 0 ? 1024.0 : (kind == 1 ? 2560.0 : 6144.0);
+		float boxH = kind == 0 ? 1024.0 : (kind == 1 ? 2048.0 : 3072.0);
+		float innerW = kind == 0 ? 0.0 : (kind == 1 ? 1024.0 : 2560.0);
+		vec3 boxSize = vec3(boxW, boxH, boxW);
+		vec3 vel = vec3(wind.x, -uParticleParams.z, wind.z);
+		vec3 p = vec3(WeatherRandom(seed), WeatherRandom(seed + 1u), WeatherRandom(seed + 2u)) * boxSize + vel * time;
+		if (snow) p.xz += vec2(sin(time * 1.3 + WeatherRandom(seed + 6u) * 40.0), cos(time * 1.1 + WeatherRandom(seed + 7u) * 40.0)) * 10.0;
+		p = cam + (fract((p - cam) / boxSize + 0.5) - 0.5) * boxSize;
+
+		// Layers cross-fade, and each fades out before it wraps at its edge.
+		float boxDist = max(abs(p.x - cam.x), abs(p.z - cam.z));
+		alpha = 1.0 - smoothstep(boxW * 0.4, boxW * 0.5, boxDist);
+		if (kind > 0) alpha *= smoothstep(innerW * 0.4, innerW * 0.5, boxDist);
+		if (alpha <= 0.0) return;
+
+		cell = WeatherCell(p.xz);
+		if (cell.a < 0.5) return; // covered, or outside the map
+
+		if (snow)
+		{
+			if (p.y < cell.r) return;
+			center = p;
+			eye = ViewMatrix * vec4(p, 1.0);
+			if (eye.z > -2.0) return;
+			float pixel = 2.0 * -eye.z / (ProjectionMatrix[1][1] * float(uViewHeight));
+			float size = max(uParticleParams.w, pixel * 1.5);
+			alpha *= min(1.0, uParticleParams.w / size) * clamp((-eye.z - 6.0) / 24.0, 0.0, 1.0);
+			alpha *= clamp((p.y - cell.r) / 4.0, 0.0, 1.0);
+			eye.xy += c * (size * 0.5);
+			pixelpos = vec4(p, -eye.z);
+			vTexCoord.w = 11.0;
+		}
+		else
+		{
+			vec3 dir = normalize(vel);
+			vec3 head = p;
+			vec3 tail = p - dir * uParticleParams.w;
+			if (tail.y <= cell.r) return; // the whole streak has reached the ground
+			if (head.y < cell.r) head = mix(tail, head, (tail.y - cell.r) / (tail.y - head.y));
+			center = (head + tail) * 0.5;
+			vec3 toCam = cam - center;
+			float dist = length(toCam);
+			if (dist < 1.0) return;
+			// A thin ribbon along the motion that faces the camera. Distant drops
+			// keep a minimum on-screen width and get fainter instead.
+			float pixel = 2.0 * dist / (ProjectionMatrix[1][1] * float(uViewHeight));
+			float width = max(uParticleParams2.z, pixel * 1.2);
+			alpha *= min(1.0, uParticleParams2.z / width) * clamp((dist - 8.0) / 48.0, 0.0, 1.0);
+			vec3 side = cross(dir, toCam / dist);
+			float sideLen = length(side);
+			side = sideLen > 0.01 ? side / sideLen : vec3(1.0, 0.0, 0.0);
+			vec3 pos = mix(tail, head, c.y * 0.5 + 0.5) + side * (c.x * width * 0.5);
+			eye = ViewMatrix * vec4(pos, 1.0);
+			pixelpos = vec4(pos, -eye.z);
+		}
+	}
+	else
+	{
+		// Splashes where drops land: each slot repeats at its own rate, at a new
+		// spot of a world-space lattice around the camera every time.
+		if (snow) return;
+		float period = 0.45 + WeatherRandom(seed) * 0.45;
+		float phase = time / period + WeatherRandom(seed + 1u);
+		uint cycleSeed = seed ^ WeatherHash(uint(floor(phase)) + 0x51ed270bu);
+		float life = kind == 3 ? 0.4 : 0.18;
+		float u = fract(phase) * period / life;
+		if (u >= 1.0 || WeatherRandom(cycleSeed + 3u) >= density) return;
+		vec2 xz = vec2(WeatherRandom(cycleSeed), WeatherRandom(cycleSeed + 1u)) * 1024.0;
+		xz = cam.xz + (fract((xz - cam.xz) / 1024.0 + 0.5) - 0.5) * 1024.0;
+		cell = WeatherCell(xz);
+		if (cell.a < 0.5 || abs(cell.r - cam.y) > 1024.0) return;
+		alpha = 1.2 * (1.0 - u) * (1.0 - smoothstep(380.0, 512.0, max(abs(xz.x - cam.x), abs(xz.y - cam.z))));
+		vLightmap.x = 0.0;
+		if (kind == 3)
+		{
+			// Ripple ring lying on the ground
+			float radius = mix(0.8, 4.5, sqrt(u));
+			center = vec3(xz.x, cell.r + 0.4, xz.y);
+			vec3 pos = center + vec3(c.x * radius, 0.0, c.y * radius);
+			eye = ViewMatrix * vec4(pos, 1.0);
+			pixelpos = vec4(pos, -eye.z);
+			vTexCoord.w = 9.0;
+		}
+		else
+		{
+			// Upward burst of droplets
+			float size = 2.0 + 4.0 * u;
+			center = vec3(xz.x, cell.r + size * 0.5, xz.y);
+			eye = ViewMatrix * vec4(center, 1.0);
+			eye.xy += c * (size * 0.5);
+			pixelpos = vec4(center, -eye.z);
+			vTexCoord.w = 10.0;
+		}
+		alpha *= clamp((-eye.z - 8.0) / 32.0, 0.0, 1.0);
+	}
+
+	// Lit by the sector light where it falls, the GI, nearby dynamic lights
+	// (rain catches lamp light strongly) and lightning.
+	float base = clamp(cell.b * 1.5 - 0.1, 0.08, 1.0);
+	vec3 light = ParticleLighting(center, base, snow ? 1.0 : 2.5);
+	vColor = vec4(uDynLightColor.rgb * light * uParticleParams2.y, alpha);
+	ParticleOutput(eye);
 }
 #endif
 
@@ -138,7 +381,8 @@ void main()
 	#ifndef SIMPLE
 	if (uMaterialParams.w > 0.0)
 	{
-		ParticleVertex();
+		if (uMaterialParams.z > 1.5) WeatherVertex();
+		else ParticleVertex();
 		return;
 	}
 	#endif

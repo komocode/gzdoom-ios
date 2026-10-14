@@ -16,6 +16,7 @@ layout(location=0) out vec4 FragColor;
 layout(binding=0) uniform sampler2D InputTexture;
 layout(binding=1) uniform sampler2D HistoryTexture;
 layout(binding=2) uniform sampler2D DepthTexture;
+layout(binding=3) uniform sampler2D ReactiveTexture; // scene normals; alpha is the reactive mask
 
 vec3 ToYCoCg(vec3 c)
 {
@@ -45,6 +46,7 @@ void main()
 	float weightSum = 0.0;
 	float confidence = 0.0;
 	float depth = 1.0;
+	float reactive = 0.0;
 	for (int y = -1; y <= 1; y++)
 	{
 		for (int x = -1; x <= 1; x++)
@@ -55,6 +57,7 @@ void main()
 			m1 += c;
 			m2 += c * c;
 			depth = min(depth, textureLod(DepthTexture, tuv, 0.0).x);
+			if (Reactive > 0.5) reactive = max(reactive, textureLod(ReactiveTexture, tuv, 0.0).a);
 			vec2 d = nearest + vec2(x, y) - texelPos;
 			float w = exp(-2.3 * dot(d, d));
 			sum += rgb * w;
@@ -87,8 +90,11 @@ void main()
 	// Variance clipping in YCoCg.
 	vec3 mean = m1 / 9.0;
 	vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-	vec3 lo = mean - 1.25 * sigma;
-	vec3 hi = mean + 1.25 * sigma;
+	// Reactive pixels (moving sprites, particles, liquids, translucency) have no
+	// motion vectors of their own: clip their history tighter and keep less of it.
+	float gamma = mix(1.25, 0.75, reactive);
+	vec3 lo = mean - gamma * sigma;
+	vec3 hi = mean + gamma * sigma;
 	vec3 h = ToYCoCg(history);
 	vec3 center = (lo + hi) * 0.5;
 	vec3 extent = max((hi - lo) * 0.5, vec3(1e-4));
@@ -104,6 +110,7 @@ void main()
 	float pixels = length((s - prev) * vec2(1.0 / InvSize.x, 1.0 / InvSize.y) * Scale);
 	float feedback = Feedback * mix(1.0, 0.8, clamp(pixels / 16.0, 0.0, 1.0));
 	feedback = 1.0 - (1.0 - feedback) * mix(0.25, 1.0, confidence);
+	feedback *= 1.0 - 0.75 * reactive;
 
 	// Luminance-weighted blend so bright HDR pixels don't dominate (no fireflies).
 	float wc = (1.0 - feedback) / (1.0 + dot(current, vec3(0.299, 0.587, 0.114)));

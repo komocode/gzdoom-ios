@@ -126,7 +126,13 @@ CUSTOM_CVARD(Int, gl_texture_filter, 4, CVAR_ARCHIVE|CVAR_GLOBALCONFIG|CVAR_NOIN
 	screen->SetTextureFilterMode();
 }
 
+// Apple builds upload a level's textures, sprites and models at load time
+// instead of on first sight, which otherwise hitches the first frames.
+#ifdef __APPLE__
+CVAR(Bool, gl_precache, true, CVAR_ARCHIVE)
+#else
 CVAR(Bool, gl_precache, false, CVAR_ARCHIVE)
+#endif
 
 
 CUSTOM_CVAR(Int, gl_shadowmap_filter, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)

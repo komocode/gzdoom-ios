@@ -342,7 +342,7 @@ public:
 	
 	void DrawSubsectors(HWDrawInfo *di, FRenderState &state);
 	void DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent);
-	void SetReflectivity(FRenderState &state);
+	void SetReflectivity(HWDrawInfo *di, FRenderState &state);
     
     void DrawOtherPlanes(HWDrawInfo *di, FRenderState &state);
     void DrawFloodPlanes(HWDrawInfo *di, FRenderState &state);

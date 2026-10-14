@@ -72,6 +72,28 @@ EXTERN_CVAR(Bool, save_formatted)
 //
 //==========================================================================
 
+FSerializer &Serialize(FSerializer &arc, const char *key, FWeatherSettings &weather, FWeatherSettings *def)
+{
+	if (arc.BeginObject(key))
+	{
+		arc("type", weather.Type)
+			("density", weather.Density)
+			("windspeed", weather.WindSpeed)
+			("windangle", weather.WindAngle)
+			("length", weather.Length)
+			("fallspeed", weather.FallSpeed)
+			("color", weather.Color);
+		arc.EndObject();
+	}
+	return arc;
+}
+
+//==========================================================================
+//
+//
+//
+//==========================================================================
+
 FSerializer &Serialize(FSerializer &arc, const char *key, line_t &line, line_t *def)
 {
 	if (arc.BeginObject(key))
@@ -983,6 +1005,13 @@ void FLevelLocals::Serialize(FSerializer &arc, bool hubload)
 		("skyfog", skyfog)
 		("thickfogdistance", thickfogdistance)
 		("thickfogmultiplier", thickfogmultiplier)
+		("heightfogdensity", heightfogdensity)
+		("heightfogbase", heightfogbase)
+		("heightfogfalloff", heightfogfalloff)
+		("heightfognoise", heightfognoise)
+		("heightfogcolor", heightfogcolor)
+		("heightfogwind", heightfogwind)
+		("weather", weather)
 		("deathsequence", deathsequence)
 		("bodyqueslot", bodyqueslot)
 		("spawnindex", spawnindex)

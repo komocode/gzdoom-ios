@@ -27,6 +27,7 @@ public:
 	void PostProcessScene(int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D);
 
 	void AmbientOccludeScene(float m5);
+	void ReflectScene(float m5);
 	void BlurScene(float gameinfobluramount);
 	void ClearTonemapPalette();
 

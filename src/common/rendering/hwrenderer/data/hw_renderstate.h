@@ -126,6 +126,15 @@ enum EPassType
 	MAX_PASS_TYPES
 };
 
+// Screen-space reflections run after the translucent pass and read the
+// reflection marker that opaque surfaces of the main view leave in the G-buffer.
+enum EGBufferMode
+{
+	GBUFFER_OPAQUE = 0,	// write the surface's reflectivity and roughness
+	GBUFFER_COVER = 1,	// mark covered pixels (alpha >= 0.5) as not reflective, leave the rest
+	GBUFFER_KEEP = 2,	// leave the G-buffer unchanged (additive and fuzz styles)
+};
+
 struct FVector4PalEntry
 {
 	float r, g, b, a;
@@ -202,7 +211,10 @@ struct StreamData
 	FVector4 uDetailParms;
 	FVector4 uNpotEmulation;
 	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint, z = parallax, w = particle time
-	FVector4 padding2, padding3;
+	FVector4 uMaterialParams2;	// x = wetness, y = puddle coverage, z = rain ripples, w = G-buffer mode (EGBufferMode)
+	FVector4 uSurfaceParams;	// x = TAA reactive mask, y = fullbright emission, z, w unused
+	FVector4 uParticleParams;	// GPU particles and weather (hw_gpuparticles.h, hw_weather.h); x > 0 on other draws: soft fade distance
+	FVector4 uParticleParams2;
 };
 
 class FRenderState
@@ -309,6 +321,10 @@ public:
 		mStreamData.uNpotEmulation = { 0,0,0,0 };
 #endif
 		mStreamData.uMaterialParams = { 0,0,0,0 };
+		mStreamData.uMaterialParams2 = { 0,0,0,0 };
+		mStreamData.uSurfaceParams = { 0,0,0,0 };
+		mStreamData.uParticleParams = { 0,0,0,0 };
+		mStreamData.uParticleParams2 = { 0,0,0,0 };
 		mModelMatrix.loadIdentity();
 		mTextureMatrix.loadIdentity();
 		ClearClipSplit();
@@ -482,7 +498,20 @@ public:
 
 	void SetDetailParms(float xscale, float yscale, float bias)
 	{
-		mStreamData.uDetailParms = { xscale, yscale, bias, 0 };
+		mStreamData.uDetailParms = { xscale, yscale, bias, mStreamData.uDetailParms.W };
+	}
+
+	// How much the TAA resolve and MetalFX should distrust history for this
+	// draw (moving sprites, particles, liquids, translucency). Reset by SetMaterial.
+	void SetReactive(float amount)
+	{
+		mStreamData.uSurfaceParams.X = amount;
+	}
+
+	// Lets a fullbright sprite's bright texels emit HDR light. Reset by SetMaterial.
+	void SetFullbrightEmission(bool on)
+	{
+		mStreamData.uSurfaceParams.Y = on ? 1.f : 0.f;
 	}
 
 	void SetDynLight(float r, float g, float b)
@@ -514,9 +543,23 @@ public:
 	}
 
 	// z enables parallax occlusion mapping; only solid walls and flats set it.
-	void SetMaterialParams(float reflectivity, float gloss, bool parallax = false)
+	// Wetness darkens the surface and raises its gloss; puddles and rain ripples
+	// only apply to upward-facing surfaces. The G-buffer mode is kept.
+	void SetMaterialParams(float reflectivity, float gloss, bool parallax = false, float wetness = 0, float puddles = 0, float ripples = 0)
 	{
 		mStreamData.uMaterialParams = { reflectivity, gloss, parallax ? 1.f : 0.f, 0 };
+		mStreamData.uMaterialParams2 = { wetness, puddles, ripples, mStreamData.uMaterialParams2.W };
+	}
+
+	// How surfaces write the reflection marker in the G-buffer pass (see EGBufferMode).
+	void SetGBufferMode(int mode)
+	{
+		mStreamData.uMaterialParams2.W = (float)mode;
+	}
+
+	int GetGBufferMode() const
+	{
+		return (int)mStreamData.uMaterialParams2.W;
 	}
 
 	// w > 0 switches the scene shaders to GPU particle mode; w is the current time
@@ -524,6 +567,26 @@ public:
 	void SetParticleParams(float now, bool additive)
 	{
 		mStreamData.uMaterialParams = { 0, 0, additive ? 1.f : 0.f, now > 1e-3f ? now : 1e-3f };
+		mStreamData.uMaterialParams2.X = mStreamData.uMaterialParams2.Y = mStreamData.uMaterialParams2.Z = 0;
+	}
+
+	// Weather mode of the particle path (hw_weather.h): z = 2 rain, 3 snow.
+	void SetWeatherParams(float now, bool snow)
+	{
+		mStreamData.uMaterialParams = { 0, 0, snow ? 3.f : 2.f, now > 1e-3f ? now : 1e-3f };
+	}
+
+	void SetParticleExtra(const FVector4 &params, const FVector4 &params2)
+	{
+		mStreamData.uParticleParams = params;
+		mStreamData.uParticleParams2 = params2;
+	}
+
+	// Fades the following translucent draws where they approach opaque scene
+	// geometry (soft particles). Needs the scene's linear depth; 0 turns it off.
+	void SetSoftFade(float distance)
+	{
+		mStreamData.uParticleParams = { distance, 0, 0, 0 };
 	}
 
 	void SetNpotEmulation(float factor, float offset)
@@ -634,7 +697,9 @@ private:
 		mMaterial.mChanged = true;
 		mTextureModeFlags = mat->GetLayerFlags();
 		auto scale = mat->GetDetailScale();
-		mStreamData.uDetailParms = { scale.X, scale.Y, 2, 0 };
+		// w carries the material's HDR emission strength (GLDEFS 'emissive').
+		mStreamData.uDetailParms = { scale.X, scale.Y, 2, mat->GetEmissive() };
+		mStreamData.uSurfaceParams.X = mStreamData.uSurfaceParams.Y = 0;
 	}
 
 public:

@@ -138,6 +138,19 @@ inline Resolution SelectResolution(const Settings &s, int width, int height, flo
     return {output / edge * adaptiveScale, 1.f};
 }
 
+// Pixel-art presentation of a reduced output: nearest-neighbour instead of a
+// bilinear stretch, and a scale just above 1/n snaps down to 1/n so the stretch
+// is an exact integer multiple. A texel already spans several screen pixels at
+// these resolutions, so a non-integer nearest stretch is far less visible than blur.
+struct Presentation { float outputScale; bool linear; };
+inline Presentation SelectPresentation(float outputScale, bool pixelArt)
+{
+    if (!pixelArt || outputScale >= 1.f) return {outputScale, !pixelArt};
+    float n = std::ceil(1.f / outputScale - 0.001f);
+    if (n >= 2.f && 1.f / n <= outputScale && 1.f / n >= outputScale * 0.94f) outputScale = 1.f / n;
+    return {outputScale, false};
+}
+
 // Respond to sustained load, ignoring startup, map loads, menus and isolated
 // spikes. GPU time excludes the frame limiter and the presentation wait.
 class AdaptiveQuality

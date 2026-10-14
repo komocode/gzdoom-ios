@@ -45,7 +45,7 @@ id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl,
 	@autoreleasepool
 	{
 		// Ray queries need SPIR-V 1.4.
-		bool vulkan12 = layout == MtlShaderLayout::Scene && mRaytracing;
+		bool vulkan12 = (layout == MtlShaderLayout::Scene && mRaytracing) || layout == MtlShaderLayout::PostProcessRayQuery;
 		std::vector<unsigned int> spirv;
 		try
 		{
@@ -94,6 +94,8 @@ id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl,
 				AddBinding(msl, model, 0, 0, 0, MTLTEX_SHADOWMAP, MTLTEX_SHADOWMAP);
 				AddBinding(msl, model, 0, 1, 0, MTLTEX_LIGHTMAP, MTLTEX_LIGHTMAP);
 				AddBinding(msl, model, 0, 3, 0, MTLTEX_IRRADIANCE, MTLTEX_IRRADIANCE);
+				AddBinding(msl, model, 0, 4, 0, MTLTEX_WEATHER, 0);
+				AddBinding(msl, model, 0, 5, 0, MTLTEX_SCENEDEPTH, 0);
 				AddBinding(msl, model, 0, 2, MTLBUF_ACCELERATION, 0, 0);
 			}
 			else
@@ -234,14 +236,15 @@ MtlPPShader *MtlShaderManager::GetPPShader(PPShader *shader)
 
 /////////////////////////////////////////////////////////////////////////////
 
-static FString LoadPPShaderCode(const FString &lumpName, const FString &defines)
+static FString LoadPPShaderCode(const FString &lumpName, const FString &defines, bool rayQuery = false)
 {
 	int lump = fileSystem.CheckNumForFullName(lumpName.GetChars());
 	if (lump == -1) I_FatalError("Unable to load '%s'", lumpName.GetChars());
 	FString code = GetStringFromLump(lump);
 
 	FString patchedCode;
-	patchedCode.AppendFormat("#version %d\n#extension GL_GOOGLE_include_directive : enable\n", 450);
+	patchedCode.AppendFormat("#version %d\n#extension GL_GOOGLE_include_directive : enable\n", rayQuery ? 460 : 450);
+	if (rayQuery) patchedCode << "#extension GL_EXT_ray_query : enable\n";
 	patchedCode << defines;
 	patchedCode << "#line 1\n";
 	patchedCode << code;
@@ -257,5 +260,6 @@ MtlPPShader::MtlPPShader(MetalRenderDevice *fb, PPShader *shader)
 
 	auto manager = fb->GetShaderManager();
 	VertexFunction = manager->Compile(shader->VertexShader.GetChars(), LoadPPShaderCode(shader->VertexShader, ""), true, MtlShaderLayout::PostProcess);
-	FragmentFunction = manager->Compile(shader->FragmentShader.GetChars(), LoadPPShaderCode(shader->FragmentShader, prolog), false, MtlShaderLayout::PostProcess);
+	FragmentFunction = manager->Compile(shader->FragmentShader.GetChars(), LoadPPShaderCode(shader->FragmentShader, prolog, shader->RayQuery), false,
+		shader->RayQuery ? MtlShaderLayout::PostProcessRayQuery : MtlShaderLayout::PostProcess);
 }

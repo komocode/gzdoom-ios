@@ -65,6 +65,7 @@ void VkDescriptorSetManager::Deinit()
 
 void VkDescriptorSetManager::BeginFrame()
 {
+	SceneDepth = nullptr;
 	UpdateFixedSet();
 	UpdateHWBufferSet();
 }
@@ -104,9 +105,19 @@ void VkDescriptorSetManager::UpdateFixedSet()
 	update.AddCombinedImageSampler(FixedSet.get(), 0, fb->GetTextureManager()->Shadowmap.View.get(), fb->GetSamplerManager()->ShadowmapSampler.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	update.AddCombinedImageSampler(FixedSet.get(), 1, fb->GetTextureManager()->Lightmap.View.get(), fb->GetSamplerManager()->LightmapSampler.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	update.AddCombinedImageSampler(FixedSet.get(), 3, fb->GetTextureManager()->Irradiance.View.get(), fb->GetSamplerManager()->LightmapSampler.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	update.AddSampledImage(FixedSet.get(), 4, fb->GetTextureManager()->WeatherMap.View.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	update.AddSampledImage(FixedSet.get(), 5, SceneDepth ? SceneDepth->View.get() : fb->GetTextureManager()->GetNullTextureView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	if (fb->RaytracingEnabled())
 		update.AddAccelerationStructure(FixedSet.get(), 2, fb->GetRaytrace()->GetAccelStruct());
 	update.Execute(fb->device.get());
+}
+
+void VkDescriptorSetManager::SetSceneDepth(VkTextureImage* image)
+{
+	// The current set may already be in use by recorded draws, so allocate a new
+	// one. The next render pass rebinds it (VkRenderState::BeginRenderPass).
+	SceneDepth = image;
+	UpdateFixedSet();
 }
 
 void VkDescriptorSetManager::ResetHWTextureSets()
@@ -193,7 +204,7 @@ void VkDescriptorSetManager::RemoveMaterial(VkMaterial* texture)
 	Materials.erase(texture->it);
 }
 
-VulkanDescriptorSet* VkDescriptorSetManager::GetInput(VkPPRenderPassSetup* passSetup, const TArray<PPTextureInput>& textures, bool bindShadowMapBuffers)
+VulkanDescriptorSet* VkDescriptorSetManager::GetInput(VkPPRenderPassSetup* passSetup, const TArray<PPTextureInput>& textures, bool bindShadowMapBuffers, VulkanBuffer* storage)
 {
 	auto descriptors = AllocatePPDescriptorSet(passSetup->DescriptorLayout.get());
 	descriptors->SetDebugName("VkPostprocess.descriptors");
@@ -218,6 +229,9 @@ VulkanDescriptorSet* VkDescriptorSetManager::GetInput(VkPPRenderPassSetup* passS
 		write.AddBuffer(descriptors.get(), LIGHTLIST_BINDINGPOINT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, fb->GetBufferManager()->LightList->mBuffer.get());
 	}
 
+	if (storage)
+		write.AddBuffer(descriptors.get(), PP_STORAGE_BINDINGPOINT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, storage);
+
 	write.Execute(fb->device.get());
 	imageTransition.Execute(fb->GetCommands()->GetDrawCommands());
 
@@ -239,7 +253,7 @@ std::unique_ptr<VulkanDescriptorSet> VkDescriptorSetManager::AllocatePPDescripto
 
 	PPDescriptorPool = DescriptorPoolBuilder()
 		.AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 200)
-		.AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4)
+		.AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16)
 		.MaxSets(100)
 		.DebugName("PPDescriptorPool")
 		.Create(fb->device.get());
@@ -253,7 +267,7 @@ void VkDescriptorSetManager::CreateHWBufferSetLayout()
 		.AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
 		.AddBinding(1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
 		.AddBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
-		.AddBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.AddBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT) // GPU particles are lit per vertex
 		.AddBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT)
 		.DebugName("VkDescriptorSetManager.HWBufferSetLayout")
 		.Create(fb->device.get());
@@ -264,7 +278,9 @@ void VkDescriptorSetManager::CreateFixedSetLayout()
 	DescriptorSetLayoutBuilder builder;
 	builder.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	builder.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-	builder.AddBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+	builder.AddBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	builder.AddBinding(4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	builder.AddBinding(5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	if (fb->RaytracingEnabled())
 		builder.AddBinding(2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	builder.DebugName("VkDescriptorSetManager.FixedSetLayout");
@@ -285,6 +301,7 @@ void VkDescriptorSetManager::CreateFixedSetPool()
 {
 	DescriptorPoolBuilder poolbuilder;
 	poolbuilder.AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * maxSets);
+	poolbuilder.AddPoolSize(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * maxSets);
 	if (fb->RaytracingEnabled())
 		poolbuilder.AddPoolSize(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 * maxSets);
 	poolbuilder.MaxSets(maxSets);

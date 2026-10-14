@@ -26,6 +26,7 @@ private:
 
 	hwrenderer::LevelMesh NullMesh;
 	hwrenderer::LevelMesh* Mesh = nullptr;
+	uint64_t MeshGeneration = 0;
 
 	std::unique_ptr<VulkanBuffer> vertexBuffer;
 	std::unique_ptr<VulkanBuffer> indexBuffer;

@@ -137,6 +137,7 @@ struct HWDrawInfo
 	HWDrawList drawlists[GLDL_TYPES];
 	int vpIndex;
 	ELightMode lightmode;
+	bool SceneDepthReady = false;	// the scene's linear depth is readable for soft particles (main view, after AO)
 
 	FLevelLocals *Level;
 	HWDrawInfo * outer = nullptr;

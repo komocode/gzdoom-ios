@@ -162,3 +162,63 @@ DEFINE_ACTION_FUNCTION(_PPShader, SetUniform1i)
 	}
 	return 0;
 }
+
+//==========================================================================
+//
+// Colour grading and exposure per area, with a crossfade (modern renderer).
+//
+//==========================================================================
+
+static void ShaderSetGradingLUT(const FString &lutName, double fadeSeconds)
+{
+	hw_postprocess.grading.SetOverrideLUT(lutName, (float)fadeSeconds);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(_PPShader, SetGradingLUT, ShaderSetGradingLUT)
+{
+	PARAM_PROLOGUE;
+	PARAM_STRING(lutName);
+	PARAM_FLOAT(fadeSeconds);
+	ShaderSetGradingLUT(lutName, fadeSeconds);
+	return 0;
+}
+
+static void ShaderResetGradingLUT(double fadeSeconds)
+{
+	hw_postprocess.grading.ClearOverrideLUT((float)fadeSeconds);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(_PPShader, ResetGradingLUT, ShaderResetGradingLUT)
+{
+	PARAM_PROLOGUE;
+	PARAM_FLOAT(fadeSeconds);
+	ShaderResetGradingLUT(fadeSeconds);
+	return 0;
+}
+
+static void ShaderSetExposureBias(double ev, double fadeSeconds)
+{
+	hw_postprocess.grading.SetOverrideExposure((float)ev, (float)fadeSeconds);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(_PPShader, SetExposureBias, ShaderSetExposureBias)
+{
+	PARAM_PROLOGUE;
+	PARAM_FLOAT(ev);
+	PARAM_FLOAT(fadeSeconds);
+	ShaderSetExposureBias(ev, fadeSeconds);
+	return 0;
+}
+
+static void ShaderResetExposureBias(double fadeSeconds)
+{
+	hw_postprocess.grading.ClearOverrideExposure((float)fadeSeconds);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(_PPShader, ResetExposureBias, ShaderResetExposureBias)
+{
+	PARAM_PROLOGUE;
+	PARAM_FLOAT(fadeSeconds);
+	ShaderResetExposureBias(fadeSeconds);
+	return 0;
+}

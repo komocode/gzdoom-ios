@@ -2018,6 +2018,16 @@ void FLevelLocals::Init()
 
 	thickfogdistance = info->thickfogdistance;
 	thickfogmultiplier = info->thickfogmultiplier;
+	weather = info->weather;
+	weatherFlashStart = -1000.f;
+	weatherFlashStrength = 0.f;
+
+	heightfogdensity = info->heightfogdensity;
+	heightfogbase = info->heightfogbase;
+	heightfogfalloff = info->heightfogfalloff;
+	heightfognoise = info->heightfognoise;
+	heightfogcolor = info->heightfogcolor;
+	heightfogwind = info->heightfogwind;
 
 	pixelstretch = info->pixelstretch;
 

@@ -2013,6 +2013,14 @@ public:
 					sec->reflect[sector_t::ceiling] = (float)CheckFloat(key);
 					break;
 
+				case NAME_wetness:
+					sec->wetness = clamp((float)CheckFloat(key), 0.f, 1.f);
+					break;
+
+				case NAME_puddles:
+					sec->puddles = clamp((float)CheckFloat(key), 0.f, 1.f);
+					break;
+
 				case NAME_floorglowcolor:
 					sec->SetGlowColor(sector_t::floor, CheckInt(key));
 					break;

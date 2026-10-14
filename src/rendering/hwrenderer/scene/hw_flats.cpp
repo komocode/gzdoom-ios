@@ -311,6 +311,8 @@ void HWFlat::DrawFloodPlanes(HWDrawInfo *di, FRenderState &state)
 //
 //
 //==========================================================================
+static bool IsLiquidFlat(FTextureID tex);
+
 void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 {
 #ifdef _DEBUG
@@ -331,7 +333,17 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 	state.SetAddColor(AddColor | 0xff000000);
 	state.ApplyTextureManipulation(TextureFx);
 	if (plane.plane.dithertransflag) state.SetEffect(EFF_DITHERTRANS);
-	SetReflectivity(state);
+	SetReflectivity(di, state);
+
+	// TAA: animated liquids keep less history; blended planes are fully reactive.
+	float reactive = 0.f;
+	if (r_taa_reactive)
+	{
+		int terrain = sector->GetTerrain(ceiling ? sector_t::ceiling : sector_t::floor);
+		bool liquid = (terrain >= 0 && terrain < (int)Terrains.Size() && Terrains[terrain].IsLiquid) || IsLiquidFlat(sector->GetTexture(ceiling ? sector_t::ceiling : sector_t::floor));
+		if (translucent) reactive = 1.f;
+		else if (liquid || (texture && texture->isWarped())) reactive = 2.f / 3.f;
+	}
 
 	if (hacktype & SSRF_PLANEHACK)
 	{
@@ -346,6 +358,7 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 		if (sector->special != GLSector_Skybox)
 		{
 			state.SetMaterial(texture, UF_Texture, 0, CLAMP_NONE, NO_TRANSLATION, -1);
+			state.SetReactive(reactive);
 			SetPlaneTextureRotation(state, &plane, texture);
 			DrawSubsectors(di, state);
 			state.EnableTextureMatrix(false);
@@ -353,6 +366,7 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 		else if (!hacktype)
 		{
 			state.SetMaterial(texture, UF_Texture, 0, CLAMP_XY, NO_TRANSLATION, -1);
+			state.SetReactive(reactive);
 			state.SetLightIndex(dynlightindex);
 			state.Draw(DT_TriangleStrip,iboindex, 4);
 			flatvertices += 4;
@@ -374,6 +388,7 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 			if (!texture->GetTranslucency()) state.AlphaFunc(Alpha_GEqual, gl_mask_threshold);
 			else state.AlphaFunc(Alpha_GEqual, 0.f);
 			state.SetMaterial(texture, UF_Texture, 0, CLAMP_NONE, NO_TRANSLATION, -1);
+			state.SetReactive(reactive);
 			SetPlaneTextureRotation(state, &plane, texture);
 			di->VPUniforms.mViewMatrix.translate(0.0, zshift, 0.0);
 			screen->mViewpoints->SetViewpoint(state, &di->VPUniforms);
@@ -393,8 +408,10 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 
 //==========================================================================
 //
-// Reflectivity for screen-space reflections: liquids are strongly
+// Reflection parameters for screen-space reflections: liquids are strongly
 // reflective; with r_ssr 2 other floors get a subtle glossy reflection.
+// GLDEFS materials can set reflectivity and roughness for any texture, and
+// MAPINFO or UDMF sector wetness and puddles make floors wet.
 //
 //==========================================================================
 
@@ -421,13 +438,17 @@ static bool IsLiquidFlat(FTextureID tex)
 	return liquid;
 }
 
-void HWFlat::SetReflectivity(FRenderState &state)
+void HWFlat::SetReflectivity(HWDrawInfo *di, FRenderState &state)
 {
-	float reflectivity = 0, gloss = 0;
+	float reflectivity = 0, gloss = 0, wetness = 0, puddles = 0, ripples = 0;
+	bool liquid = false;
 	if (r_ssr > 0 || r_specular)
 	{
-		int terrain = sector->GetTerrain(ceiling ? sector_t::ceiling : sector_t::floor);
-		bool liquid = (terrain >= 0 && terrain < (int)Terrains.Size() && Terrains[terrain].IsLiquid) || IsLiquidFlat(sector->GetTexture(sector_t::floor));
+		// 3D-floor planes come from their control sector: use the plane's own
+		// texture, not the floor of the sector they are in.
+		int pos = ceiling ? sector_t::ceiling : sector_t::floor;
+		int terrain = plane.texture == sector->GetTexture(pos) ? sector->GetTerrain(pos) : TerrainTypes[plane.texture];
+		liquid = (terrain >= 0 && terrain < (int)Terrains.Size() && Terrains[terrain].IsLiquid) || IsLiquidFlat(plane.texture);
 		if (liquid && !ceiling)
 		{
 			reflectivity = 0.55f;
@@ -436,10 +457,24 @@ void HWFlat::SetReflectivity(FRenderState &state)
 		else if (r_ssr > 1 && !ceiling)
 		{
 			reflectivity = 0.14f;
-			gloss = 0.3f;
+			gloss = 0.5f;
+		}
+		if (texture != nullptr && texture->GetReflectivity() >= 0) reflectivity = texture->GetReflectivity();
+		if (texture != nullptr && texture->GetReflectRoughness() >= 0) gloss = 1.f - texture->GetReflectRoughness();
+
+		if (!ceiling && !liquid)
+		{
+			auto info = di->Level->info;
+			wetness = max(sector->wetness, info ? info->wetness : 0.f);
+			puddles = max(sector->puddles, info ? info->puddles : 0.f);
+			// Rain only reaches floors under an open sky.
+			if (info && info->rainripples > 0 && sector->GetTexture(sector_t::ceiling) == skyflatnum)
+				ripples = info->rainripples;
 		}
 	}
-	state.SetMaterialParams(reflectivity, gloss, reflectivity == 0 && alpha >= 1.f);
+	// Liquids are flat and animated, so they don't get parallax; other
+	// reflective floors keep it (puddles flatten it in the shader).
+	state.SetMaterialParams(reflectivity, gloss, !liquid && alpha >= 1.f, wetness, puddles, ripples);
 }
 
 //==========================================================================

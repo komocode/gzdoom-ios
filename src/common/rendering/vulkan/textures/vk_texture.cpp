@@ -33,6 +33,7 @@ VkTextureManager::VkTextureManager(VulkanRenderDevice* fb) : fb(fb)
 	CreateShadowmap();
 	CreateLightmap();
 	SetIrradianceVolume(0, 0, 0, {});
+	SetWeatherMap(0, 0, {});
 }
 
 VkTextureManager::~VkTextureManager()
@@ -205,6 +206,18 @@ void VkTextureManager::SetIrradianceVolume(int width, int height, int layers, co
 		return;
 	}
 	UploadHalfArray(Irradiance, width, height, layers, rgbaHalfData.Data(), 4, "VkRenderBuffers.Irradiance");
+}
+
+void VkTextureManager::SetWeatherMap(int width, int height, const TArray<uint16_t>& rgbaHalfData)
+{
+	if (width <= 0 || height <= 0 || rgbaHalfData.Size() < unsigned(width * height * 4))
+	{
+		TArray<uint16_t> data;
+		for (int i = 0; i < 4; i++) data.Push(0);
+		UploadHalfArray(WeatherMap, 1, 1, 1, data.Data(), 4, "VkRenderBuffers.WeatherMap");
+		return;
+	}
+	UploadHalfArray(WeatherMap, width, height, 1, rgbaHalfData.Data(), 4, "VkRenderBuffers.WeatherMap");
 }
 
 void VkTextureManager::UploadHalfArray(VkTextureImage& image, int w, int h, int count, const uint16_t* src, int srcChannels, const char* name)

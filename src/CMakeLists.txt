@@ -928,6 +928,8 @@ set (PCH_SOURCES
 	rendering/hwrenderer/doom_levelmesh.cpp
 	rendering/hwrenderer/hw_irradiance.cpp
 	rendering/hwrenderer/hw_gpuparticles.cpp
+	rendering/hwrenderer/hw_volumetric.cpp
+	rendering/hwrenderer/hw_weather.cpp
 	rendering/hwrenderer/hw_models.cpp
 	rendering/hwrenderer/hw_precache.cpp
 	rendering/hwrenderer/scene/hw_lighting.cpp

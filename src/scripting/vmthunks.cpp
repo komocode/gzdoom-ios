@@ -61,6 +61,7 @@
 #include "texturemanager.h"
 #include "v_draw.h"
 #include "d_net.h"
+#include "hw_weather.h"
 
 extern int paused;
 extern bool pauseext;
@@ -1797,6 +1798,57 @@ DEFINE_ACTION_FUNCTION_NATIVE(_Sector, SetXOffset, SetXOffset)
 	 return 0;
  }
 
+ // Visual-only weather (hw_weather.h); savegames keep the settings.
+ static void SetWeather(FLevelLocals *self, int type, double density, double windSpeed, double windAngle, int color, double length, double fallSpeed)
+ {
+	 self->weather.Type = clamp(type, (int)WEATHER_None, (int)WEATHER_Snow);
+	 self->weather.Density = (float)clamp(density, 0., 2.);
+	 self->weather.WindSpeed = (float)windSpeed;
+	 self->weather.WindAngle = (float)windAngle;
+	 self->weather.Color = color ? (uint32_t(color) | 0xff000000) : 0;
+	 self->weather.Length = (float)clamp(length, 0.1, 8.);
+	 self->weather.FallSpeed = (float)clamp(fallSpeed, 0.05, 8.);
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SetWeather, SetWeather)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 PARAM_INT(type);
+	 PARAM_FLOAT(density);
+	 PARAM_FLOAT(windspeed);
+	 PARAM_FLOAT(windangle);
+	 PARAM_COLOR(color);
+	 PARAM_FLOAT(length);
+	 PARAM_FLOAT(fallspeed);
+	 SetWeather(self, type, density, windspeed, windangle, color, length, fallspeed);
+	 return 0;
+ }
+
+ static int GetWeather(FLevelLocals *self)
+ {
+	 return self->weather.Type;
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, GetWeather, GetWeather)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 ACTION_RETURN_INT(self->weather.Type);
+ }
+
+ static void WeatherFlash(FLevelLocals *self, double strength, double duration)
+ {
+	 Weather_Flash(self, strength, duration);
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, WeatherFlash, WeatherFlash)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 PARAM_FLOAT(strength);
+	 PARAM_FLOAT(duration);
+	 Weather_Flash(self, strength, duration);
+	 return 0;
+ }
+
  DEFINE_ACTION_FUNCTION(FLevelLocals, StartIntermission)
  {
 	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
@@ -2660,6 +2712,27 @@ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, isFrozen, isFrozen)
 	ACTION_RETURN_INT(isFrozen(self));
 }
 
+static void SetHeightFog(FLevelLocals *self, double density, double base, double falloff, int color, double noise)
+{
+	self->heightfogdensity = max(density, 0.);
+	self->heightfogbase = base;
+	self->heightfogfalloff = max(falloff, 1.);
+	self->heightfogcolor = color;
+	self->heightfognoise = clamp(noise, 0., 1.);
+}
+
+DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SetHeightFog, SetHeightFog)
+{
+	PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	PARAM_FLOAT(density);
+	PARAM_FLOAT(base);
+	PARAM_FLOAT(falloff);
+	PARAM_COLOR(color);
+	PARAM_FLOAT(noise);
+	SetHeightFog(self, density, base, falloff, color, noise);
+	return 0;
+}
+
 void setFrozen(FLevelLocals *self, int on)
 {
 	self->frozenstate = (self->frozenstate & ~1) | !!on;
@@ -2956,6 +3029,12 @@ DEFINE_FIELD(FLevelLocals, outsidefogdensity)
 DEFINE_FIELD(FLevelLocals, skyfog)
 DEFINE_FIELD(FLevelLocals, thickfogdistance)
 DEFINE_FIELD(FLevelLocals, thickfogmultiplier)
+DEFINE_FIELD(FLevelLocals, heightfogdensity)
+DEFINE_FIELD(FLevelLocals, heightfogbase)
+DEFINE_FIELD(FLevelLocals, heightfogfalloff)
+DEFINE_FIELD(FLevelLocals, heightfognoise)
+DEFINE_FIELD(FLevelLocals, heightfogcolor)
+DEFINE_FIELD(FLevelLocals, heightfogwind)
 DEFINE_FIELD(FLevelLocals, pixelstretch)
 DEFINE_FIELD(FLevelLocals, MusicVolume)
 DEFINE_FIELD(FLevelLocals, deathsequence)

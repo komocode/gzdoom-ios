@@ -73,6 +73,7 @@ enum ModelRendererType
 	GLModelRendererType,
 	SWModelRendererType,
 	PolyModelRendererType,
+	LevelMeshModelRendererType,	// CPU copy for the level mesh (static models)
 	NumModelRendererTypes
 };
 

@@ -4,9 +4,35 @@
 #include "engineerrors.h"
 #include "mtl_objects.h"
 #include "common/platform/apple/apple_graphics_policy.h"
+#include <condition_variable>
+#include <mutex>
+#include <vector>
 
 class MtlRenderState;
 class MtlPostprocess;
+
+// GPU progress, shared with the command buffer completion handlers (which run
+// on a Metal thread and may outlive the device).
+struct MtlFrameSync
+{
+	std::mutex Mutex;
+	std::condition_variable Changed;
+	int Outstanding = 0;		// committed command buffers that have not completed
+	uint64_t Completed = 0;		// every frame up to this one has finished
+	double LastGpuTime = 0;		// seconds of GPU time of frame Completed
+
+	struct Frame
+	{
+		uint64_t Serial = 0;
+		int Pending = 0;
+		bool Ended = false;
+		double GpuTime = 0;
+	};
+	Frame Frames[MTL_MAX_FRAMES_IN_FLIGHT + 2];
+
+	Frame &Get(uint64_t serial);
+	void Advance();
+};
 
 class MetalRenderDevice : public SystemBaseFrameBuffer
 {
@@ -34,7 +60,17 @@ public:
 	// Draw commands run after the uploads queued for the same frame.
 	id<MTLCommandBuffer> GetDrawCommands();
 	id<MTLBlitCommandEncoder> GetUploadEncoder();
+	// Commits the commands recorded so far; wait drains the GPU completely.
 	void FlushCommands(bool wait);
+
+	// Frames in flight. The frame being recorded is CurrentFrame(); per-frame
+	// buffers use FrameSlot(). DeferRelease keeps an object alive until every
+	// frame recorded so far has finished on the GPU.
+	uint64_t CurrentFrame() const { return mFrameSerial; }
+	int FrameSlot() const { return mFrameSlot; }
+	bool GpuBusy();
+	void WaitForFrame(uint64_t serial);
+	void DeferRelease(id object);
 	id<MTLTexture> GetDrawableTexture();
 	bool UnifiedMemory() const { return mUnifiedMemory; }
 #if TARGET_OS_IPHONE
@@ -60,14 +96,20 @@ public:
 	void BeginFrame() override;
 	void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t> &LMTextureData) override;
 	void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t> &rgbaHalfData) override;
+	bool InitWeatherMap(int width, int height, TArray<uint16_t> &rgbaHalfData) override;
+	bool SceneDepthReadable() override { return true; }
 	void BlurScene(float amount) override;
 	void PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D) override;
 	void AmbientOccludeScene(float m5) override;
+	void ReflectScene(float m5) override;
 	void SetSceneRenderTarget(bool useSSAO) override;
 	void SetLevelMesh(hwrenderer::LevelMesh *mesh) override;
+	bool RaytracedShadowsActive() override { return mRaytracing; }
 
 	bool SupportsPlatformUpscaler() override;
-	bool PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset) override;
+	bool PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *reactive, PPTexture *output, float jitterX, float jitterY, bool reset) override;
+	float GetHdrHeadroom() override { return mHdrActive ? mHdrHeadroom : 1.f; }
+	bool HdrOutputActive() const { return mHdrActive; }
 	void UpdateShadowMap() override;
 	void SetSaveBuffers(bool yes) override;
 	void ImageTransitionScene(bool unknown) override;
@@ -94,6 +136,10 @@ private:
 	void RenderTextureView(FCanvasTexture *tex, std::function<void(IntRect &)> renderFunc) override;
 	void CopyScreenToBuffer(int w, int h, uint8_t *data) override;
 	void Present();
+	void Commit(id<MTLCommandBuffer> commands);
+	void BeginNextFrame();
+	void QueuePipelines(bool both);
+	void UpdateHdrOutput();
 	void UpdateAutoQuality(double gpuMs, double seconds);
 	void ApplyAutoQuality();
 
@@ -114,6 +160,7 @@ private:
 	id<MTLBlitCommandEncoder> mUploadEncoder = nil;
 	id<CAMetalDrawable> mDrawable = nil;
 	id mTemporalScaler = nil;	// MetalFX, created for the current input and output sizes
+	bool mTemporalScalerReactive = false;	// created with a reactive mask input
 
 	bool mVSync = false;
 	bool mUnifiedMemory = true;
@@ -121,7 +168,19 @@ private:
 	bool mRaytracingConfigured = false;
 	bool mPrimaryShadersDone = false, mShadersReady = false;
 	bool mUpscalerFailed = false;
-	double mFrameGpuTime = 0.0;	// seconds of GPU time in command buffers committed this frame
+	int mPrewarmSignature[4] = { -1, -1, -1, -1 };
+
+	std::shared_ptr<MtlFrameSync> mSync = std::make_shared<MtlFrameSync>();
+	uint64_t mFrameSerial = 1;
+	uint64_t mLastTimedFrame = 0;
+	int mFrameSlot = 0;
+	int mFramesInFlight = 1;
+	double mGpuStatTime = 0.0;	// seconds of GPU time of the last finished frame
+	struct DeferredRelease { id Object; uint64_t Frame; };
+	std::vector<DeferredRelease> mDeferredReleases;
+
+	bool mHdrActive = false;	// EDR swapchain (vk_hdr): RGBA16Float in extended linear sRGB
+	float mHdrHeadroom = 1.f;
 	AppleGraphics::Capabilities mAutoCaps{};
 	AppleGraphics::Settings mAutoSettings{};
 	AppleGraphics::AdaptiveQuality mAutoQuality;

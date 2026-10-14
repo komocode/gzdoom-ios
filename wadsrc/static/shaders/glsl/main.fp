@@ -180,7 +180,10 @@ const int Tex_Blend_Hardlight = 4;
 
 vec4 getTexel(vec2 st)
 {
-	vec4 texel = texture(tex, st);
+	// TAA and upscaling resolve subpixel detail, so they sample sharper mips.
+	vec4 texel;
+	if (uMipBias != 0.0) texel = texture(tex, st, uMipBias);
+	else texel = texture(tex, st);
 
 	//
 	// Apply texture modes
@@ -732,6 +735,7 @@ const int RF_SPECULAR = 4;
 const int RF_IRRADIANCE = 8;
 const int RF_REFLECTIONS = 16;
 const int RF_PARALLAX = 32;
+const int RF_HDR_EMISSIVE = 64;
 
 bool HasFeature(int feature)
 {
@@ -741,6 +745,85 @@ bool HasFeature(int feature)
 bool HasSurfaceNormal()
 {
 	return dot(vWorldNormal.xyz, vWorldNormal.xyz) > 0.5;
+}
+
+//===========================================================================
+//
+// Wet surfaces and screen-space reflections. uMaterialParams2 holds the
+// wetness, puddle coverage and rain ripple strength of the surface (from
+// MAPINFO and UDMF sector properties) and its G-buffer mode.
+//
+//===========================================================================
+
+float gPuddle = 0.0;		// puddle mask of this pixel (0-1)
+float gWetness = 0.0;		// wetness after puddles (0-1)
+float gReflectivity = 0.0;	// written to the G-buffer for SSR
+float gRoughness = 1.0;
+vec3 gReflectNormal = vec3(0.0);	// world space; zero keeps the geometric normal
+vec2 gTexCoord = vec2(0.0);	// texture coordinate after parallax
+
+float SurfaceHash(vec2 p)
+{
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float SurfaceNoise(vec2 p)
+{
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(SurfaceHash(i), SurfaceHash(i + vec2(1.0, 0.0)), f.x),
+		mix(SurfaceHash(i + vec2(0.0, 1.0)), SurfaceHash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float UpFacing()
+{
+	return HasSurfaceNormal() ? smoothstep(0.5, 0.9, normalize(vWorldNormal.xyz).y) : 0.0;
+}
+
+// Procedural puddles: low-frequency noise in map space, thresholded by the
+// coverage. Dark texels (cracks and mortar) fill first.
+float PuddleMask(float texelLum)
+{
+	float coverage = uMaterialParams2.y;
+	if (coverage <= 0.0) return 0.0;
+	float up = UpFacing();
+	if (up <= 0.0) return 0.0;
+	vec2 p = pixelpos.xz / 192.0;
+	float n = SurfaceNoise(p) * 0.6 + SurfaceNoise(p * 2.7 + 13.1) * 0.3 + SurfaceNoise(p * 7.9 + 5.3) * 0.1;
+	n += (0.5 - texelLum) * 0.12;
+	float threshold = mix(0.78, 0.22, coverage);
+	return smoothstep(threshold - 0.03, threshold + 0.03, n) * up;
+}
+
+// Expanding rings from rain drops, as a gradient of the water height in map space.
+vec2 RainRipples(vec2 p, float time)
+{
+	vec2 grad = vec2(0.0);
+	for (int layer = 0; layer < 3; layer++)
+	{
+		vec2 q = p / 22.0 + vec2(float(layer) * 0.37, float(layer) * 0.71);
+		vec2 cell = floor(q);
+		float h = SurfaceHash(cell + float(layer) * 17.0);
+		vec2 center = vec2(0.3) + 0.4 * vec2(h, fract(h * 13.7));
+		float phase = fract(time * 0.8 + h * 7.0);
+		vec2 d = fract(q) - center;
+		float r = length(d);
+		float x = (r - phase * 0.3) * 36.0;
+		float amp = (1.0 - phase) * (1.0 - phase);
+		grad += d / max(r, 1e-3) * (x * exp(-x * x * 0.5)) * amp;
+	}
+	return grad;
+}
+
+float EncodeReflection(float reflectivity, float roughness)
+{
+	// Alpha above 0.5 marks a scene surface. The 7 bits below hold 4 bits of
+	// reflectivity and 3 of roughness, dithered so TAA smooths the steps.
+	float d = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+	float r = min(floor(clamp(reflectivity, 0.0, 1.0) * 15.0 + d), 15.0);
+	float g = min(floor(clamp(roughness, 0.0, 1.0) * 7.0 + d), 7.0);
+	return (255.0 - (r * 8.0 + g)) / 255.0;
 }
 
 // Explicit gradients keep the lookups valid inside divergent control flow.
@@ -757,7 +840,7 @@ vec2 ParallaxTexCoord(vec2 st)
 	if (uMaterialParams.z == 0.0 || !HasSurfaceNormal() || (uTextureMode & 0xffff) != 0) return st;
 	vec3 toCamera = uCameraPos.xyz - pixelpos.xyz;
 	float dist = length(toCamera);
-	float fade = 1.0 - smoothstep(256.0, 640.0, dist);
+	float fade = (1.0 - smoothstep(256.0, 640.0, dist)) * (1.0 - gPuddle);
 	if (fade <= 0.0) return st;
 
 	vec3 n = normalize(vWorldNormal.xyz);
@@ -853,6 +936,35 @@ void ApplyIrradiance(inout float lightlevel, inout vec3 tint)
 	tint /= max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.001);
 }
 
+// Sky exposure map (hw_weather.h): one texel per cell of the map seen from above.
+// r = height where rain stops (the highest floor or 3D floor under the sky),
+// g = sky ceiling height, b = sector light level, a = 1 when the sky is above.
+vec4 WeatherCell(vec2 mapPos)
+{
+	if (uWeatherMap.w <= 0.0) return vec4(0.0);
+	ivec2 cell = ivec2(floor((mapPos - uWeatherMap.xy) * uWeatherMap.z));
+	if (cell.x < 0 || cell.y < 0 || cell.x >= int(uWeatherMap.w) || cell.y >= int(uWeatherParams.x)) return vec4(0.0);
+	return texelFetch(WeatherMap, ivec3(cell, 0), 0);
+}
+
+// 1 where a point (x, height, y) is under open sky (rain and lightning reach it), else 0.
+float WeatherExposure(vec3 pos)
+{
+	vec4 cell = WeatherCell(pos.xz);
+	return cell.a * step(cell.r - 2.0, pos.y);
+}
+
+// Soft particles: fades a translucent fragment out within dist map units of
+// the opaque scene behind it, from the half-resolution linear depth.
+float SoftDepthFade(float dist)
+{
+	if (dist <= 0.0) return 1.0;
+	ivec2 size = textureSize(SceneLinearDepth, 0);
+	ivec2 texel = clamp(ivec2(gl_FragCoord.xy * uSceneDepthMap.xy + uSceneDepthMap.zw), ivec2(0), size - 1);
+	float sceneDepth = texelFetch(SceneLinearDepth, texel, 0).r;
+	return clamp((sceneDepth - pixelpos.w) / dist, 0.0, 1.0);
+}
+
 //===========================================================================
 //
 // Sets the common material properties.
@@ -870,6 +982,7 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 	}
 #endif	
 	if (HasFeature(RF_PARALLAX)) texCoord = ParallaxTexCoord(texCoord);
+	gTexCoord = texCoord.st;
 	material.Base = getTexel(texCoord.st); 
 	material.Normal = ApplyNormalMap(texCoord.st);
 #if !defined(NORMALMAP) && !defined(NO_LAYERS)
@@ -881,7 +994,10 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 // OpenGL doesn't care, but Vulkan pukes all over the place if these texture samplings are included in no-texture shaders, even though never called.
 #ifndef NO_LAYERS
 	if ((uTextureMode & TEXF_Brightmap) != 0)
-		material.Bright = desaturate(texture(brighttexture, texCoord.st));
+	{
+		if (uMipBias != 0.0) material.Bright = desaturate(texture(brighttexture, texCoord.st, uMipBias));
+		else material.Bright = desaturate(texture(brighttexture, texCoord.st));
+	}
 
 	if ((uTextureMode & TEXF_Detailmap) != 0)
 	{
@@ -892,6 +1008,67 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 	if ((uTextureMode & TEXF_Glowmap) != 0)
 		material.Glow = desaturate(texture(glowtexture, texCoord.st));
 #endif
+}
+
+//===========================================================================
+//
+// Wet look and reflection parameters. Wetness darkens and saturates the
+// albedo and raises gloss; puddles are near-mirrors with a flat surface.
+// The reflection normal follows the texture relief, toned down so
+// reflections don't get noisy, and rain ripples where it rains.
+//
+//===========================================================================
+
+void SetupReflection(inout Material material)
+{
+	if (!HasFeature(RF_MODERN_LIGHT)) return;
+
+	float up = UpFacing();
+	float lum = grayscale(material.Base);
+	gPuddle = PuddleMask(lum);
+	float wet = max(clamp(uMaterialParams2.x, 0.0, 1.0), gPuddle);
+	gWetness = wet;
+	if (wet > 0.0)
+	{
+		vec3 base = material.Base.rgb;
+		base = pow(max(base, vec3(0.0)), vec3(1.0 + 0.6 * wet)) * (1.0 - 0.12 * wet);
+		material.Base.rgb = mix(base, base * vec3(0.92, 0.96, 1.04), gPuddle * 0.5);
+	}
+
+	if (!HasFeature(RF_REFLECTIONS)) return;
+
+	float reflectivity = uMaterialParams.x;
+	float roughness = 1.0 - clamp(uMaterialParams.y, 0.0, 1.0);
+#ifdef PBR
+	roughness = clamp(material.Roughness, 0.0, 1.0);
+#endif
+	// Without an authored roughness, brighter and smoother texels are glossier.
+	roughness = clamp(roughness + (0.4 - lum) * 0.15 * (1.0 - uMaterialParams.y), 0.0, 1.0);
+	reflectivity = max(reflectivity, wet * 0.35 * up);
+	roughness = min(roughness, mix(1.0, 0.35, wet * up));
+	reflectivity = mix(reflectivity, 0.85, gPuddle);
+	roughness = mix(roughness, 0.04, gPuddle);
+	gReflectivity = reflectivity;
+	gRoughness = roughness;
+
+	if (reflectivity <= 0.0 || !HasSurfaceNormal()) return;
+
+	vec3 geom = normalize(vWorldNormal.xyz);
+	vec3 n = material.Normal;
+#if !defined(NORMALMAP) && !defined(NO_LAYERS)
+	if (HasFeature(RF_AUTO_NORMAL) && uLightIndex < 0)
+		n = AutoNormal(geom, gTexCoord, dFdx(gTexCoord), dFdy(gTexCoord));
+#endif
+	if (dot(n, n) < 0.5) n = geom;
+	n = normalize(mix(geom, n, 0.35 * (1.0 - gPuddle)));
+
+	float ripples = uMaterialParams2.z * up * max(wet, 0.25);
+	if (ripples > 0.0)
+	{
+		vec2 g = RainRipples(pixelpos.xz, timer);
+		n = normalize(n + vec3(g.x, 0.0, g.y) * (0.35 * ripples));
+	}
+	gReflectNormal = n;
 }
 
 //===========================================================================
@@ -907,6 +1084,25 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 // because we can't just desaturate the final fragment color.
 //
 //===========================================================================
+
+//===========================================================================
+//
+// HDR emission of brightmapped texels and of the bright texels of fullbright
+// sprites. uDetailParms.w is the material's GLDEFS 'emissive' factor.
+//
+//===========================================================================
+
+vec3 EmissiveColor(Material material)
+{
+	vec3 mask = material.Bright.rgb;
+	if (uSurfaceParams.y > 0.0)
+	{
+		// Fullbright sprites without a brightmap: their bright, lamp-like texels emit.
+		float peak = max(max(material.Base.r, material.Base.g), material.Base.b);
+		mask = max(mask, vec3(smoothstep(0.8, 1.0, peak)));
+	}
+	return material.Base.rgb * mask * (uEmissiveStrength * sqrt(max(uDetailParms.w, 0.0)));
+}
 
 vec4 getLightColor(Material material, float fogdist, float fogfactor)
 {
@@ -983,7 +1179,16 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 	//
 	// apply dynamic lights
 	//
-	return vec4(ProcessMaterialLight(material, color.rgb), material.Base.a * vColor.a);
+	vec3 frag = ProcessMaterialLight(material, color.rgb);
+
+	//
+	// HDR emission: bright texels may exceed white so they drive bloom. With a
+	// strength of 1 this is exactly the classic brightmap result.
+	//
+	if (HasFeature(RF_HDR_EMISSIVE))
+		frag = max(frag, EmissiveColor(material));
+
+	return vec4(frag, material.Base.a * vColor.a);
 }
 
 //===========================================================================
@@ -1079,10 +1284,30 @@ vec4 ParticleColor()
 		a = 1.0 - smoothstep(edge - 0.08, edge, sqrt(r2));
 		rgb *= 0.75 + 0.45 * clamp(0.5 + 0.5 * dot(c, vec2(-0.6, 0.8)), 0.0, 1.0);
 	}
-	else // droplet: dense with a specular glint
+	else if (shape < 3.5) // droplet: dense with a specular glint
 	{
 		a = 1.0 - smoothstep(0.55, 1.0, r2);
 		rgb += vec3(0.5) * exp(-30.0 * dot(c - vec2(-0.3, 0.3), c - vec2(-0.3, 0.3))) * vColor.a;
+	}
+	else if (shape < 4.5 || (shape > 8.5 && shape < 9.5)) // ring: shock waves, foam, rain ripples
+	{
+		float r = sqrt(r2);
+		a = smoothstep(0.55, 0.85, r) * (1.0 - smoothstep(0.88, 1.0, r));
+	}
+	else if (shape < 5.5 || shape > 10.5) // mote, snow flake: small soft disc
+	{
+		a = exp(-3.5 * r2) * (1.0 - smoothstep(0.7, 1.0, r2));
+	}
+	else if (shape < 8.5) // rain streak: c.x across, c.y from tail (-1) to head (1)
+	{
+		a = (1.0 - c.x * c.x) * (0.3 + 0.7 * smoothstep(-1.0, 0.6, c.y));
+	}
+	else // splash: droplets thrown up in a crown
+	{
+		vec2 q = c - vec2(0.0, -1.0);
+		float ang = atan(q.x, q.y);
+		float crown = smoothstep(0.3, 0.0, abs(length(q) - 0.85)) * step(abs(ang), 1.2);
+		a = crown * (0.5 + 0.5 * sin(ang * 9.0 + seed * 20.0));
 	}
 	// Soft intersection with the surface the particle came from and the floor.
 	float soft = glowdist.y;
@@ -1099,14 +1324,36 @@ void main()
 
 	if (uMaterialParams.w > 0.0)
 	{
-		FragColor = ParticleColor();
+		vec4 frag = ParticleColor();
+		bool weather = uMaterialParams.z > 1.5;
+		bool additive = uMaterialParams.z > 0.5 && uMaterialParams.z < 2.5;
+		// Soft against the opaque scene: per draw for the weather, scaled by size
+		// for particles. Solid chunks and droplets stay hard so they can lie on the floor.
+		bool solid = vTexCoord.w > 1.5 && vTexCoord.w < 3.5;
+		frag.a *= SoftDepthFade(weather ? uParticleParams2.w * vLightmap.x : (uParticleParams.x > 0.0 && !solid ? max(glowdist.y * 2.0, uParticleParams.x) : 0.0));
+		if (uFogEnabled != 0)
+		{
+			float fogfactor = exp2(uFogDensity * max(16.0, pixelpos.w));
+			if (additive || uFogEnabled > 0) frag.rgb *= fogfactor; // additive light and black fog fade out
+			else frag.rgb = mix(uFogColor.rgb, frag.rgb, fogfactor);
+		}
+		FragColor = frag;
 		if (FragColor.a <= 0.002) discard;
 #ifdef GBUFFER_PASS
-		FragFog = vec4(AmbientOcclusionColor(), 1.0);
-		FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, 1.0);
+		// Particles hide reflections behind dense parts; additive ones never do.
+		// Screen-space reflections run after this, so the normals of what is
+		// behind must survive: alpha-blended particles only replace them where
+		// they cover, additive ones add nothing to them and only raise the TAA
+		// reactive mask in the alpha (weather by its density, particles fully).
+		float cover = (uMaterialParams.z < 0.5 && FragColor.a >= 0.5) ? 1.0 : 0.0;
+		FragFog = vec4(AmbientOcclusionColor(), cover);
+		if (additive) FragNormal = vec4(0.0, 0.0, 0.0, weather ? FragColor.a : 1.0);
+		else FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, cover);
 #endif
 		return;
 	}
+
+	gPuddle = HasFeature(RF_MODERN_LIGHT) ? PuddleMask(0.5) : 0.0;
 
 #ifndef LEGACY_USER_SHADER
 	Material material;
@@ -1125,6 +1372,7 @@ void main()
 #else
 	Material material = ProcessMaterial();
 #endif
+	SetupReflection(material);
 	vec4 frag = material.Base;
 
 #ifndef NO_ALPHATEST
@@ -1163,6 +1411,14 @@ void main()
 		{
 			frag = getLightColor(material, fogdist, fogfactor);
 
+			// Lightning: a brief sky light on everything under open sky. It is
+			// added after the light clamps so that a strike can reach the bloom.
+			if (uWeatherParams.y > 0.0)
+			{
+				vec3 probe = pixelpos.xyz + (HasSurfaceNormal() ? normalize(vWorldNormal.xyz) * 8.0 : vec3(0.0, 8.0, 0.0));
+				frag.rgb += material.Base.rgb * (uWeatherParams.y * WeatherExposure(probe)) * vec3(0.8, 0.85, 1.0);
+			}
+
 			//
 			// colored fog
 			//
@@ -1187,6 +1443,7 @@ void main()
 			frag = frag * ProcessLight(material, vColor);
 		frag.rgb = frag.rgb + uFogColor.rgb;
 	}
+	if (uParticleParams.x > 0.0) frag.a *= SoftDepthFade(uParticleParams.x);
 	FragColor = frag;
 
 #ifdef DITHERTRANS
@@ -1210,9 +1467,34 @@ void main()
 #endif
 
 #ifdef GBUFFER_PASS
-	// Alpha above 0.5 marks a scene surface; (1 - alpha) * 2 is its reflectivity.
-	// Cleared pixels (sky, void) keep alpha 0 and never reflect.
-	FragFog = vec4(AmbientOcclusionColor(), HasFeature(RF_REFLECTIONS) ? 1.0 - 0.5 * uMaterialParams.x : 1.0);
-	FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, 1.0);
+	// Cleared pixels (sky, void) keep alpha 0 and never reflect. Translucent
+	// surfaces only mark what they cover as not reflective (see EGBufferMode).
+	if (uMaterialParams2.w < 0.5)
+	{
+		vec3 eyeNormal = vEyeNormal.xyz;
+		if (gReflectivity > 0.0 && dot(gReflectNormal, gReflectNormal) > 0.5)
+			eyeNormal = normalize((NormalViewMatrix * vec4(gReflectNormal, 1.0)).xyz);
+		FragFog = vec4(AmbientOcclusionColor(), EncodeReflection(gReflectivity, gRoughness));
+		// The normal's alpha is the TAA reactive mask: 0 keeps history, 1 ignores it.
+		FragNormal = vec4(eyeNormal * 0.5 + 0.5, uSurfaceParams.x);
+	}
+	else
+	{
+		// The normals behind must survive for the reflections: blended surfaces
+		// only replace them where they cover (and those pixels no longer reflect),
+		// and additive ones (GBUFFER_KEEP) add nothing to them and only raise the
+		// reactive mask. Other blend ops in that mode have a reactive amount of 0.
+		if (uMaterialParams2.w < 1.5)
+		{
+			float cover = FragColor.a >= 0.5 ? 1.0 : 0.0;
+			FragFog = vec4(AmbientOcclusionColor(), cover);
+			FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, cover * uSurfaceParams.x);
+		}
+		else
+		{
+			FragFog = vec4(0.0);
+			FragNormal = vec4(0.0, 0.0, 0.0, uSurfaceParams.x);
+		}
+	}
 #endif
 }

@@ -17,31 +17,127 @@ Apple GPUs:
 
 | Feature | CVARs | How it works | Cost |
 |---|---|---|---|
-| Baked GI (indirect bounce, colour bleeding) | `r_gi`, `r_gi_strength`, `r_gi_saturation`, `r_gi_quality`, `r_gi_rebake` | Irradiance probe grid. Each probe holds an ambient cube (6 colours), baked once per level on background threads by ray tracing the level mesh with a BVH. Hits return albedo × (sector light + static dynamic lights, with shadow rays). The scene shader adds part of the bounce above the sector light level and tints by its chroma. Doom light levels stay the floor. | E1M1: 97×60×10 probes in about 0.12 s on M1 Max. One 3D texture fetch ×3 per pixel. |
+| Baked GI (indirect bounce, colour bleeding) | `r_gi`, `r_gi_strength`, `r_gi_saturation`, `r_gi_quality`, `r_gi_rebake` | Irradiance probe grid. Each probe holds an ambient cube (6 colours), baked once per level on background threads by ray tracing the level mesh with a BVH. Hits return albedo × (sector light + static dynamic lights, with shadow rays, GLDEFS intensity, additive lights and spot cones) plus the emissive part of fullbright and brightmapped textures. Sky hits return the sky texture's average colour (night skies stay dark), blended towards the fog colour by `skyfog`. The probe grid only spans the playable map. The scene shader adds part of the bounce above the sector light level and tints by its chroma. Doom light levels stay the floor. | E1M1: 97×60×10 probes in about 0.12 s on M1 Max. One 3D texture fetch ×3 per pixel. |
 | Soft dynamic-light shadows | `gl_light_shadowmap`, `gl_shadowmap_filter`, `gl_shadowmap_quality` | Contact-hardening filter on GZDoom's 1D shadow maps. A blocker search estimates the occluder distance, then a jittered, tent-weighted PCF widens the penumbra with it. Used in modern mode when the filter is above 0. | 6 + 4–10 taps per shadowed light |
 | Texture relief ("auto normal") | `r_autonormal`, `r_autonormal_strength` | Normals from the luminance gradient of the diffuse texture, used only for dynamic lights. Classic light intensities are kept: relief modulates them. | ALU only |
 | Specular | `r_specular`, `r_specular_strength` | Normalized Blinn-Phong from dynamic lights. Gloss (inverse roughness) is estimated from texel brightness and saturation; liquids and floors raise it. Metalness is estimated too: mid-to-bright, low-saturation texels (steel, brass, copper) tint their highlights with their own colour, as PBR metals do. Highlights are unclamped so they feed bloom. | ALU only |
 | PBR material maps | existing GZDoom `normal`, `specular`, `metallic`, `roughness`, `ao` in GLDEFS | Authored maps still take priority. The automatic texture-map generation is done in the shader rather than as files: normal (relief), roughness (gloss), metallic and height (parallax) are all derived from the diffuse texture. | — |
-| Parallax occlusion mapping | `r_parallax` | 10-step steep parallax from the luminance height. Only solid walls and opaque flats opt in (`uMaterialParams.z`), so sprites and masked mid textures keep their exact shapes. Fades out between 256 and 640 units. | ≤ 10 texture taps, near surfaces only |
-| Screen-space reflections | `r_ssr` (1 liquids, 2 + glossy floors), `r_ssr_strength` | Reflectivity is packed into the spare alpha of the existing SceneFog G-buffer target, so no new target is needed. Half-resolution view-space ray march with binary refinement, then composited into the scene. Doom's animated liquids are recognised by flat name, since Doom's TERRAIN lump doesn't mark them. | Half res, 24–40 steps |
+| Parallax occlusion mapping | `r_parallax` | 10-step steep parallax from the luminance height. Only solid walls and opaque flats opt in (`uMaterialParams.z`), so sprites and masked mid textures keep their exact shapes. Reflective floors keep it; liquids and puddles are flat. Fades out between 256 and 640 units. | ≤ 10 texture taps, near surfaces only |
+| Screen-space reflections | `r_ssr` (1 liquids, wet and GLDEFS-reflective surfaces; 2 + glossy floors), `r_ssr_strength`, `r_ssr_stretch` | Runs after the translucent pass and GPU particles of the main view, so lamps, torches, monsters, glows, particles and portal contents are reflected. Opaque-style sprites write depth during that pass so rays find them. Half-resolution ray march with binary refinement against a linear depth taken at that point. Roughness picks a level of a 5-level blur chain of the scene by the width of the reflection cone, sampled as a 5-tap streak along the surface normal's direction on screen (vertical on floors), longer at grazing angles. With TAA the rays are jittered over the roughness lobe every frame. Rays that miss fall back to the sky or the blurred screen where they left the view, and hits fade into that fallback at the screen edges, so there are no holes. Composited at full resolution with the G-buffer reflectivity. Doom's animated liquids are recognised by flat name, since Doom's TERRAIN lump doesn't mark them. | Half res, 24–40 steps + 5 small blur passes |
+| Wet surfaces | MAPINFO `wetness`, `puddles`, `rainripples`; UDMF sector `wetness`, `puddles`; GLDEFS `reflectivity`, `roughness` | See [Wet surfaces and reflections](#wet-surfaces-and-reflections). Wetness darkens and saturates albedo, sharpens and strengthens dynamic-light highlights (stretched toward the viewer) and makes floors reflective. Puddles are near-mirrors from a noise mask in map space. | ALU + 4 taps on reflective pixels |
 | Screen-space GI | `r_ssgi`, `r_ssgi_strength` | 4 cosine-distributed rays × 8 steps per half-resolution pixel gather nearby lit surfaces, tinted by the receiver's hue and added to the scene. Complements the baked probes with bounce from moving lights, muzzle flashes and explosions. Shares inputs with SSR and needs no temporal history. | Half res, 32 taps |
 | Ambient occlusion | `gl_ssao` | GZDoom's existing HBAO-style SSAO. The presets drive its quality, and it shares linear depth with SSR and volumetrics. | existing |
-| Volumetric light | `r_volumetric`, `r_volumetric_strength` | Analytic in-scattering for the 7 most important dynamic lights near the view (closed-form integral along each view ray, clipped by scene depth). No froxel grid. | Half res, ≤ 7 lights |
-| HDR / tone mapping | `gl_tonemap 6` (ACES filmic) | ACES (Narkowicz fit) added to the existing tonemap choices, together with the existing auto-exposure. | existing pass |
+| Volumetric light and height fog | `r_volumetric` (1 half, 2 full resolution), `r_volumetric_strength`, `r_volumetric_shadows`, `r_volumetric_samples`, `r_volumetric_distance`, `r_volumetric_fogscatter`, `r_heightfog` | Single scattering along each view ray up to the visible surface, for up to 32 dynamic lights. Spot lights show their cones, and shadowed lights cast light shafts through bars and around pillars. Exponential height fog can roll with noise and glows around lights. See [Volumetric light and fog](#volumetric-light-and-fog). No froxel grid. | Half res: closed form per unshadowed light, 12–16 samples per shadowed or spot light |
+| HDR emission | `r_emissive`, `r_emissive_strength`, GLDEFS `emissive` | Brightmapped texels, the bright texels of fullbright sprites (lamps, projectiles, muzzle flashes) and additive dynamic lights may exceed white, so they, rather than every bright texel, drive bloom. A texel emits `max(lit, albedo × brightmap × √strength)` in the gamma-2 scene, so strength 1 is exactly the classic brightmap. `emissive <float>` in a GLDEFS `brightmap` or `material` block scales one texture (0 disables its HDR emission). | ALU only |
+| HDR resolve and tone mapping | `gl_tonemap 6` (ACES filmic), `r_tonemap_white` | One pass linearises the gamma-2 scene, applies exposure, adds the bloom in linear light, grades and tone maps. ACES is normalised so `r_tonemap_white` (linear, default 4 = the default emissive peak) reaches display white; `r_tonemap_white 1` maps 1.0 to white. With no curve selected the pass still runs when bloom, exposure or grading need it. MAPINFO `lightblendmode = Unclamped, ACES` also works. | existing pass |
+| Exposure | `r_exposure` (EV), `r_autoexposure`, `r_autoexposure_min/max/speed/key`, MAPINFO `exposurebias`, `PPShader.SetExposureBias` | A manual EV bias, plus optional eye adaptation independent of bloom: the log-average luminance is reduced to one texel and the exposure moves toward `key / average`, clamped to the EV range, at a frame-rate-independent speed. Bloom thresholds the exposed image. High and Ultra enable adaptation (−1.5 to +0.75 EV). | half-res extract + 1×1 chain |
+| Colour grading | `r_grading_lut`, `r_grade_contrast`, `r_grade_saturation`, `r_grade_shadowtint`, `r_grade_hightint`, MAPINFO `gradinglut`, `PPShader.SetGradingLUT` | Contrast around middle grey and saturation in linear light, split toning and a 32³ LUT (a 1024×32 strip: red across a slice, green down, blue picks the slice) in display space, all in the tone mapping pass. LUT changes crossfade. Ships `LUTNEUTR` (identity, a template for artists) and `LUTNIGHT` (cool shadows, warm highlights, saturated reds), generated by `scripts/grading_luts.py`. | 2–4 taps |
 | Contact shadows | `r_actorspriteshadow 2`, `r_actorspriteshadowfadeheight` | GZDoom's projected sprite shadows, always on from medium up and faded with height, plus AO. | existing |
+| Temporal stability | `r_taa_reactive`, `r_sprite_depth` | The scene pass writes a reactive mask into the alpha of the normal G-buffer (otherwise unused): 1 for blended draws (translucent sprites, walls and flats, particles), moving sprites and models, and HUD models; ⅔ for animated or warped liquids. The TAA resolve clips that history tighter and keeps less of it; MetalFX gets it as `reactiveMaskTexture` (macOS 14.4 / iOS 17.4). Because reflections are traced after the translucent pass, blended draws must keep the normals behind them: alpha-blended draws mark only the pixels they cover (alpha ≥ 0.5), additive ones raise the mask without touching the normals (rain by its density), and subtractive and fuzz styles don't mark. Opaque sprites (normal style, binary alpha) also write depth, so TAA and MetalFX reproject them like geometry; translucent sprites are drawn as before. | small |
 | Temporal anti-aliasing | `r_taa` | The 3D projection is jittered by a subpixel Halton(2,3) offset each frame. The resolve reprojects last frame's HDR result through the depth buffer and camera motion, clips it to the current 3x3 neighbourhood in YCoCg (rejecting stale history from moving sprites and disocclusions, which have no motion vectors) and blends with luminance weights. Runs before bloom and tone mapping. History resets on teleports, menus and resolution changes. Replaces FXAA from High up. | 1 full-res pass + copy |
 | Temporal upscaling | `r_upscale` (0.5–1, 1 = off; needs `r_taa`), `r_upscale_metalfx` | The 3D scene renders into a smaller part of the scene viewport and is reconstructed to the full viewport. On the Metal renderer this is MetalFX's temporal upscaler, fed with the HDR colour, depth and camera motion vectors computed from depth and the previous camera. Elsewhere (or with `r_upscale_metalfx 0`) the TAA resolve does it: each output pixel is a Gaussian-weighted sum of the nearby jittered input samples, and the history counts for more where no sample landed near the pixel. More jitter phases are used while upscaling (16, or 32 below 0.7). Exposure, bloom, tone mapping, the weapon sprite and the HUD all run at output resolution, unlike `vid_scalefactor`, which scales the HUD too. | Scene cost × scale²; resolve replaces TAA |
-| Ray traced shadows | `vk_raytrace` (Metal renderer; restart) | On GPUs with Metal ray tracing, the scene shaders trace shadow rays for dynamic lights against an acceleration structure over the level mesh, instead of GZDoom's 2D shadow maps. Unlike the shadow maps, they respect height, 3D floors and overhangs. `gl_shadowmap_filter` sets the soft-shadow sample count. Auto mode enables this only on Apple9+ GPUs with render-stage ray tracing (A17 Pro / M3 and later). Manual mode remains available. | 1–27 rays per shadowed light and pixel |
-| Modern bloom | `gl_bloom`, `r_bloom_modern` | 13-tap downsample chain (6 levels) with a soft-knee threshold, then a tent-filtered additive upsample. Fewer passes than the classic Gaussian bloom and no flicker on small highlights. | ~12 small passes |
+| Ray traced shadows | `vk_raytrace` (Metal renderer; restart) | On GPUs with Metal ray tracing, the scene shaders trace shadow rays for dynamic lights against an acceleration structure over the level mesh, instead of GZDoom's 2D shadow maps. Unlike the shadow maps, they respect height, 3D floors, overhangs, bars and static models (see [Level mesh](#level-mesh)), and every light that allows shadows gets them, not only lights that reach past a wall. The 1D shadow maps are not rendered while tracing. `gl_shadowmap_filter` sets the soft-shadow sample count. Auto mode enables this only on Apple9+ GPUs with render-stage ray tracing (A17 Pro / M3 and later). Manual mode remains available. | 1–27 rays per shadowed light and pixel |
+| Modern bloom | `gl_bloom`, `gl_bloom_amount`, `r_bloom_modern`, `r_bloom_threshold`, `r_bloom_knee` | 13-tap downsample chain (6 levels) with a soft-knee threshold on linear, exposed HDR values, then a tent-filtered additive upsample. The tone mapper adds the result in linear light (it used to be added to the gamma-encoded scene, which crushed faint halos). Fewer passes than the classic Gaussian bloom and no flicker on small highlights. | ~12 small passes |
+| Weapon bloom | `r_weapon_prebloom` | The 2D weapon sprites are drawn after TAA (so they stay sharp and unjittered) but before exposure and bloom, so muzzle flashes and emissive weapon parts bloom and are graded like the scene. | none |
 | Sharpen, vignette, grain | `r_sharpen`, `r_vignette`, `r_grain` | One pass: contrast-adaptive sharpening (CAS), a vignette, and triangular grain that also removes banding. | one full-screen pass |
-| GPU particles | `r_gpuparticles` (1 normal, 2 dense) | Visual-only and stateless. Hitscan shots draw a tracer, eject a brass casing that lies on the floor for a few seconds and leave a wisp of gun smoke. Bullet impacts throw sparks, chips and a lingering dust cloud in the colour of the surface that was hit, sprayed along its normal and faded softly where they meet that surface and the floor. Blood throws droplets, explosions throw a fireball, embers, debris and rising smoke, and glowing projectiles burst in their light's colour. Each particle is written once into a ring of persistent vertex memory; the vertex shader evaluates the motion in closed form (gravity, drag, resting on the floor, sparks stretched along their velocity), so the CPU simulates nothing per frame. Game particles, RNG, savegames and netplay are untouched. | Draws only the live part of a 16384-particle ring; 2 draws |
+| GPU particles | `r_gpuparticles` (1 normal, 2 dense) | Visual-only and stateless. Hitscan shots draw a tracer, eject a brass casing that lies on the floor for a few seconds and leave a wisp of gun smoke. Bullet impacts throw sparks, chips and a lingering dust cloud in the colour of the surface that was hit, sprayed along its normal and faded softly where they meet that surface and the floor. Blood throws droplets, explosions throw a fireball, embers, debris and rising smoke, and glowing projectiles burst in their light's colour. Each particle is written once into a ring of persistent vertex memory; the vertex shader evaluates the motion in closed form (gravity, drag, resting on the floor, sparks stretched along their velocity), so the CPU simulates nothing per frame. Falling particles rest on the floor or 3D floor below the point where their trajectory lands (sampled in 6 steps at spawn). Non-emissive particles are lit per vertex by the spawn sector's light, the baked GI, the 8 strongest dynamic lights near the camera (spot cones included) and lightning, and all particles take the view sector's fog. ZScript can spawn them too (below). Game particles, RNG, savegames and netplay are untouched. | Draws only the live part of a 16384-particle ring; 2 draws |
+| Weather | `r_weather_quality` (1 normal, 2 + distant rain); MAPINFO and ZScript (below) | Rain or snow from a fixed set of drops in three nested layers around the camera plus splash slots, all computed in the vertex shader from the vertex index and the time: one draw and no CPU work per drop. Each layer is a world-space lattice that wraps around the camera. Drops fall only where a top-down sky exposure map (built once per level from sectors and 3D floors, updated for moving sectors) shows open sky, and end on the highest floor or 3D floor below it, where ripple rings and small splashes appear. Rain is a thin camera-facing streak along its velocity (wind included), lit additively by the sector light, the GI, nearby dynamic lights and lightning. Far drops keep a minimum on-screen width and fade instead, so distant layers read as sheets. | 98k vertices (123k at 2), thin streaks; 1 draw |
+| Soft particles | `r_softparticles` | GPU particles, weather and translucent sprites flagged `+SOFTPARTICLE` (smoke, fog and steam cards) fade out where they approach opaque geometry, using the half-resolution linear depth that the AO pass computes. Needs the G-buffer pass (SSAO, SSR, SSGI, volumetrics or the TAA reactive mask); with soft particles on, the AO pass computes the depth even when SSAO itself is off. | 1 texel fetch per fragment of those draws |
+| Lightning | existing lightning, `LevelLocals.WeatherFlash` | Each flash of the lightning thinker (or a scripted, visual-only flash) adds a brief sky light to every surface, particle and drop under open sky, after the light clamps so that it reaches the bloom. | 1 texel fetch per pixel while flashing |
 | Planar reflections | `gl_plane_reflection`, `gl_mirrors` | Already in GZDoom for mirrors and reflective planes; left as is. SSR adds reflections where maps don't author them. | existing |
+
+### Volumetric light and fog
+
+The pass integrates single scattering along each view ray up to the visible
+surface (`wadsrc/static/shaders/pp/volumetric.fp`). Lights are chosen on the CPU
+each frame (`src/rendering/hwrenderer/hw_volumetric.cpp`):
+
+- **Visibility.** A light only counts if it reaches an area that the BSP walk
+  rendered this frame (its touch list stops at one-sided walls), so lights in
+  closed neighbouring rooms no longer glow through walls. Lights fade in and
+  out over a few frames rather than popping, and fade with distance over the
+  last quarter of `r_volumetric_distance` (default 4096) instead of being
+  culled at a fixed 2048. Lights attached to the camera (weapon flashes)
+  are skipped: the camera sits inside them, so they would fill the whole view.
+- **Importance.** Lights are ranked by brightness × radius / distance. The
+  first 32 are used. The most important up to `r_volumetric_shadows` (2 on
+  Medium, 4 on High, 6 on Ultra) are shadowed. A light keeps its shadows
+  until another one is clearly more important.
+- **Shadowed and spot lights** are ray marched with `r_volumetric_samples`
+  equiangular samples (spread evenly over the angle the ray segment subtends
+  at the light, so they gather near it). Each frame uses a new per-pixel
+  offset, which TAA integrates, followed by a 3×3 depth-aware blur. Spot
+  lights march only the part of the ray inside the cone (an analytic ray-cone
+  clip), with the soft edge between the inner and outer angles. Visibility
+  comes from shadow rays against the level's acceleration structure when
+  Metal ray tracing is active, otherwise from GZDoom's 1D shadow maps
+  (2D occlusion by one-sided lines, which includes void-pillar bars). Other
+  point lights use the closed-form inverse-square integral, plus a soft glow
+  that fills each light's sphere so shafts stay visible away from the light.
+- **Media.** Thin air everywhere; the camera sector's coloured fog (the same
+  density the scene shaders use for it); and an exponential height fog that
+  is constant below its base height and thins above it. Fog makes lights
+  scatter more (`r_volumetric_fogscatter`), so a red lamp in ground fog lights
+  up a red mist, and it also absorbs: distant halos fade with the fog. The
+  height fog's own colour is blended over the scene by its optical depth
+  (closed form, or 8 jittered samples when the noise is on). Sector fog is
+  already applied by the scene shaders, so the pass only adds its glow and
+  absorption.
+
+The height fog is a level property. MAPINFO keys:
+
+```
+heightfog = 3.0, 0, 40          // density per 1000 map units, base height, falloff height
+heightfogcolor = "28 2c 36"
+heightfognoise = 0.6            // 0-1, rolling mist
+heightfogwind = 24, 8           // noise scroll in map units per second
+```
+
+ZScript can read these as `Level.heightfog*` and change them with
+`Level.SetHeightFog(density, baseheight, falloff, color, noise)`; they are
+saved with the game. The `r_heightfog_density` / `_base` / `_falloff` /
+`_color` / `_noise` CVARs override the map's fog while the density is above 0,
+for trying values out. Height fog needs `r_volumetric`.
+
+`r_volumetric 2` marches every pixel of the 3D viewport from the scene depth
+buffer; `1` marches a quarter of them. Both buffers follow the 3D viewport, so
+they shrink with `r_upscale`. `stat volumetric` shows the chosen lights and fog.
+The selected light list is available to other effects through
+`R_GetVolumetricLights()`.
+
+On the Metal renderer, the light list is passed with `setFragmentBytes` and the
+acceleration structure is bound to the postprocess pass. On Vulkan it is a
+per-frame storage buffer, so the push constant block stays under 256 bytes.
+The OpenGL backends skip the pass.
+
+Test maps with a barred gate, a pillar in the light shafts, a red light in a
+closed neighbouring room, and a sky courtyard with ground fog, a red lamp and a
+spot light on a tower showed shadowed shafts, a visible cone and red mist, with
+both ray traced and shadow-map visibility, at both resolutions, and on the
+Vulkan renderer. The light in the closed room was not selected.
+
+Limitations: the 1D shadow maps have no height, so without ray tracing a light
+above a wall still shines over it; ray traced volumetric shadows are Metal
+only; translucent surfaces and particles are drawn after the pass and are not
+covered by the height fog; there are no per-sector height fog settings yet, and
+no screen-space sky shafts.
 
 ### Not implemented, and why
 
+- **Textured GPU particles.** All particles share one draw per blend mode,
+  so they use built-in procedural shapes (glow, smoke, chunk, droplet, ring,
+  mote) instead of textures.
+- **Exact ordering with translucent surfaces.** Weather is drawn before the
+  translucent pass, so water and glass behind it composite correctly, but
+  drops in front of a translucent surface are dimmed by it. GPU particles are
+  drawn after it: correct in front of translucent surfaces, drawn over those
+  behind them. Rain never falls below water: it stops at 3D floor water tops.
 - **Per-object motion vectors.** GZDoom doesn't produce them, so TAA and both
-  upscalers reproject with depth and camera motion only, and rely on
-  neighbourhood clipping (or MetalFX's own rejection) for moving sprites.
+  upscalers reproject with depth and camera motion only. Moving sprites,
+  particles and liquids are marked in the reactive mask instead, which removes
+  the ghosting at the cost of less temporal anti-aliasing on them. True
+  velocities would need the previous position of every actor, model bone,
+  sector mover and texture scroll in a separate target.
 - **Ray tracing on Vulkan through MoltenVK.** MoltenVK does not expose ray
   queries; ray traced shadows need the Metal renderer.
 - **Nanite-style geometry.** Not useful for Doom-scale geometry.
@@ -60,11 +156,47 @@ through MoltenVK (`vid_preferbackend 1`) stays available.
 - **Same structure.** The device, render state, buffers, textures, render
   targets and postprocess passes mirror the Vulkan backend
   (`src/common/rendering/metal/`), so the hardware renderer, the 2D drawer and
-  every postprocess pass run unchanged. Like the Vulkan backend, it waits for
-  the GPU at the end of each frame.
+  every postprocess pass run unchanged.
+- **Frames in flight.** `r_framesinflight` (default 2, 1–3) frames are
+  committed at Present without waiting, so the CPU records the next frame
+  while the GPU renders the last one: frame time is about max(CPU, GPU)
+  instead of CPU + GPU. Before a frame starts, the device waits only for the
+  frame that last used the same buffers. CPU-written data is never overwritten
+  while the GPU may read it:
+  - Stream uniforms, matrices, viewpoints, lights and bones have one buffer per
+    frame in flight, switched at the frame start.
+  - The flat vertex buffer is N-buffered (`FFlatVertexBuffer`'s pipeline
+    buffers, as GLES does). Its copy count is fixed at startup (at least 2),
+    so raising the setting to 3 takes a restart. Rewriting its static part
+    (level load, resize) waits for the GPU first.
+  - `SetSubData` (the shadow map's dynamic AABB nodes) and `Lock` write to a
+    copy while the GPU is busy. The software renderer's output buffers wait
+    for the frame that last showed them.
+  - GPU particles never reuse a ring slot that one of the last 8 draws
+    included; when the ring is full, the new particle is dropped instead.
+  - Old MetalFX scalers and ray tracing acceleration structures are released
+    once the frames that used them have finished. Other resources are kept
+    alive by the command buffers that use them.
+
+  Screenshots, savegame pictures, resolution and MSAA changes, mid-frame
+  uniform-buffer overflow, shutdown and changes to `r_framesinflight` drain
+  the GPU first. `stat gpu` and the adaptive quality controller use the GPU
+  time of the newest finished frame, read in the completion handlers.
+  `r_framesinflight 1` restores the old behaviour of waiting at the end of
+  every frame. The Vulkan backend keeps its own synchronization.
 - **Unified memory.** Buffers and uploaded textures use shared storage: no
   staging copies. Mipmaps are generated on the GPU in a separate upload command
   buffer that runs before the frame.
+- **No first-use stalls.** Creating a pipeline compiles its shaders for the
+  vertex layout, attachments and blend state. Until the system shader cache
+  holds that combination, this took 0.1–0.45 s on the M4. The common scene
+  pipelines (opaque, masked, translucent and additive walls, flats, sprites,
+  liquids, sky, stencil and particles, with and without the G-buffer) are
+  compiled during startup for the active shaders. The other shader set (traced
+  or shadow-map) and any new vertex layout or MSAA count follow on Metal's
+  compiler threads, two at a time, so they never delay a pipeline a frame
+  needs. Apple builds also default `gl_precache` to on, so a level's textures,
+  sprites and models are uploaded at load time instead of on first sight.
 - **Features only Metal has here:** MetalFX temporal upscaling and ray traced
   shadows (above), and MSAA through Metal's resolve. Simulator SDKs and tvOS
   have no usable MetalFX; there the TAA resolve upscales.
@@ -79,11 +211,126 @@ through MoltenVK (`vid_preferbackend 1`) stays available.
   the traced shadow falls diagonally across the floor below, where the shadow
   map shades a full-height band. Frames match the Vulkan renderer: Classic is
   pixel-identical; Ultra differs on 0.1–0.3% of pixels (MSAA included), from
-  exposure adaptation timing.
+  exposure adaptation timing. With frames in flight, API validation stays
+  clean at 1, 2 and 3 frames and while switching between them, including the
+  software renderer and ray tracing; shader validation is clean at 2. Classic frames match
+  the synchronous renderer except for the weapon bob phase.
 
-Not done yet: HDR output (`vk_hdr`), and memoryless G-buffer attachments,
+HDR output: with `vk_hdr 1` the Metal layer becomes an RGBA16Float extended
+linear sRGB EDR surface (`wantsExtendedDynamicRangeContent`). The tone mapper
+keeps the SDR curve up to white and rolls the energy above it into the
+display's current headroom (`NSScreen.maximumExtendedDynamicRangeColorComponentValue`,
+`UIScreen.currentEDRHeadroom`, up to 16×); the HUD and menus stay at SDR
+white, and the present pass decodes to linear without dithering. Off by
+default; the SDR path is unchanged and screenshots stay SDR. Not available on
+tvOS. Only checked on an SDR display (no headroom), where it renders the SDR image.
+
+Not done yet: memoryless G-buffer attachments,
 which need the postprocess passes that read the G-buffer to move into tile
 shaders. GPU frame time is shown with `stat gpu`.
+
+## Level mesh
+
+The baked GI and the ray traced shadows share one mesh of the level
+(`src/rendering/hwrenderer/doom_levelmesh.cpp`).
+
+- **Built from the current state.** It is built on first use, after a savegame
+  or hub snapshot has been restored, so restored doors, lifts and polyobjects
+  are where the game left them. `r_gi_rebake` rebuilds it too.
+- **Moving geometry.** While ray traced shadows are active, a hash of the sector
+  planes, 3D floor states, polyobject positions and static model placements is
+  checked every 100 ms; when it changes the mesh and the acceleration structure
+  are rebuilt (E1M1: under 1 ms on the CPU), so open doors stop casting shadows.
+  The baked GI stays as it was baked.
+- **3D floors.** Only existing, solid, opaque ones occlude, using their own top
+  and bottom planes (so Vavoom and inverted types are right). Water, glass
+  (alpha below 255), additive and fog 3D floors let light through. Their sides
+  face the sector they are seen from and use the master line's texture.
+- **Sky.** Sky ceilings, sky floors (abyss or sea below a cliff), skybox planes
+  and walls between them return sky light in the bake and never block shadow
+  rays.
+- **Masked mid textures** (bars, fences, grates, 3DMIDTEX bridges) are added as
+  the rectangles of their opaque texels (greedy-merged, at most 256 per texture),
+  so both the bake and the opaque ray tracing geometry are alpha-tested exactly
+  with no texture lookups in the shaders. Translucent mid textures are skipped.
+- **Static models.** Actors with `+STATICMESH`, and with `r_staticmodels 2`
+  (default) also non-moving decorations (not monsters, players, pickups,
+  projectiles, bobbing or rotating models), add their model (MD2/MD3/OBJ/IQM/UE1
+  and voxels) in its current frame with the actor's full model transform.
+  `-NOSTATICMESH` opts out, `r_staticmodels 1` takes only flagged actors and 0
+  none. The triangles are merged into the single level BLAS rather than
+  instanced: decorations are few, the mesh is only rebuilt when something
+  changes, and the shaders and the Vulkan backend need no changes. Each model
+  keeps a CPU copy of its vertices for this. Models that carry lights don't
+  shadow them. Interpolation is ignored and skeletal IQM models contribute
+  their bind pose. Budgets: 100k triangles per actor, 1M per level.
+- **Grid bounds.** The probe grid covers sectors connected (through two-sided
+  lines and linked portals) to a player start, monster, item or teleport
+  destination, and not to a skybox viewpoint, so skyboxes, vistas and control
+  sectors don't coarsen it.
+- Acceleration structures are cached on a mesh generation counter rather than
+  the mesh address, which the allocator can reuse for the next level.
+
+## Wet surfaces and reflections
+
+Reflections are authored per texture, per sector and per map:
+
+- **GLDEFS** (`material texture|flat|sprite <name> { ... }`): `reflectivity
+  <0-1>` makes any surface reflective, walls and model skins included;
+  `roughness <0-1>` sets how blurred its reflections are. `roughness <map>`
+  still names a roughness texture; PBR materials with one use it per pixel.
+- **UDMF sector**: `wetness = <0-1>;` makes the floor wet (walls get half of it
+  for darkening and gloss), `puddles = <0-1>;` covers that much of the floor
+  with puddles.
+- **MAPINFO** (map block): `wetness = <0-1>` and `puddles = <0-1>` are the
+  defaults for every sector of the map; `rainripples = <0-1>` animates rain
+  rings in wet floors under a sky ceiling, perturbing their reflections.
+  Weather code can drive it at runtime through `level.info->rainripples`
+  (`FLevelLocals::info`), which `HWFlat::SetReflectivity` reads every frame.
+
+Without authoring, liquids reflect at 0.55 (mirror-like) and, with `r_ssr 2`,
+other floors at 0.14 (roughness 0.5). Wet floors reflect at 0.35 × wetness
+with roughness down to 0.35; puddles at 0.85 with roughness 0.04 and no
+parallax. The reflection normal follows the normal map or the automatic
+relief at 35 % strength (none inside puddles). Liquids on 3D floors are
+detected from the plane's own texture, not the floor of the sector they sit in.
+
+## Weather, lightning and scripted particles
+
+MAPINFO level keys (all optional):
+
+```
+weather = "rain"            // "rain", "snow" or "none"
+weatherdensity = 1.2        // 0-2
+weatherwind = 120, 30       // map units per second, direction in degrees
+weatherlength = 1           // streak length (rain) or flake size (snow) multiplier
+weatherspeed = 1            // fall speed multiplier
+weathercolor = "b0 c0 d8"   // tint
+```
+
+ZScript, on `LevelLocals` (savegames keep the weather):
+`SetWeather(type, density, windSpeed, windAngle, tint, dropLength, fallSpeed)`
+with `WEATHER_None`, `WEATHER_Rain` or `WEATHER_Snow`, `GetWeather()`, and
+`WeatherFlash(strength, duration)` for a visual-only lightning flash (sector
+lights unchanged). Flashes of the existing lightning thinker light the
+weather and open-sky surfaces automatically. Testing overrides (not saved):
+`r_weather` (0 map, 1 rain, 2 snow, -1 none), `r_weather_density`,
+`r_weather_wind` and `r_weather_winddir`.
+
+GPU particles from game code: fill an `FXParticleParams` (`count`, `color1` /
+`color2`, `shape`, `flags`, `pos` and `spread`, the velocity cone `dir` /
+`coneAngle` / `speedMin` / `speedMax`, `gravity`, `drag`, `lifeMin` /
+`lifeMax`, `sizeStart` / `sizeEnd`, `alpha`, `brightness`, `stretch`, `delay`)
+and call `Level.SpawnFXParticles(p)`. Shapes are `FXS_Glow`, `FXS_Smoke`,
+`FXS_Chunk`, `FXS_Droplet`, `FXS_Ring` and `FXS_Mote`. Flags are
+`FXF_Additive` (additive and emissive), `FXF_Unlit` (alpha blended but
+emissive) and `FXF_RestOnFloor`. `FXEmitter` is an invisible actor that emits
+them continuously (`Rate` per second) and/or in bursts, optionally following
+its `master`; subclasses override `SetupParticles`. Examples: `FXTorchEmbers`,
+`FXDustMotes`, `FXSteamVent`, `FXSparkShower` and `FXSeaSpray`. Emitters use
+only the particles' own random generator, so they are netplay- and demo-safe;
+the particles themselves are not saved. `+SOFTPARTICLE` on a translucent
+sprite actor makes it fade into the scene like the GPU particles.
 
 ## Light definitions
 
@@ -99,16 +346,22 @@ from 0 to 49 static lights.
 afterwards. Choosing a preset in the menu or console turns `r_preset_auto`
 off, which keeps the platform from changing it again.
 
-| Preset | GI | Relief / specular | Parallax | SSAO | SSR | SSGI | Volumetric | Tonemap | Shadow filter / size | Sprite shadows | Particles | AA |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0 Classic | – | – | – | off | off | – | off | off | 1 / 128 | default | – | – |
-| 1 Low | ✓ | ✓ | – | off | off | – | off | ACES | 1 / 128 | default | normal | – |
-| 2 Medium | ✓ | ✓ | – | 1 | liquids | – | half | ACES | 1 / 256 | always | normal | – |
-| 3 High | ✓ | ✓ | ✓ | 2 | + floors | – | half | ACES | 2 / 512 | always | dense | TAA |
-| 4 Ultra | ✓ | ✓ | ✓ | 3 | + floors | ✓ | full | ACES | 3 / 1024 | always | dense | TAA |
+| Preset | GI | Relief / specular | Parallax | SSAO | SSR | SSGI | Volumetric | Tonemap | Shadow filter / size | Sprite shadows | Particles | Weather | Soft particles | AA |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 Classic | – | – | – | off | off | – | off | off | 1 / 128 | default | – | – | – | – |
+| 1 Low | ✓ | ✓ | – | off | off | – | off | ACES | 1 / 128 | default | normal | normal | – | – |
+| 2 Medium | ✓ | ✓ | – | 1 | liquids, wet | – | half, 2 shadowed | ACES | 1 / 256 | always | normal | normal | ✓ | – |
+| 3 High | ✓ | ✓ | ✓ | 2 | + floors | – | half, 4 shadowed | ACES | 2 / 512 | always | dense | + distant | ✓ | TAA |
+| 4 Ultra | ✓ | ✓ | ✓ | 3 | + floors | ✓ | full, 6 shadowed | ACES | 3 / 1024 | always | dense | + distant | ✓ | TAA |
 
-All presets above Classic enable the modern bloom and dynamic-light shadow
-maps. The menu is under **Options → Display → Modern Rendering**.
+All presets above Classic enable the modern bloom, dynamic-light shadow maps,
+HDR emission, weapon bloom, sprite depth and (with `r_pixelart`, on by default)
+pixel-art filtering: `gl_texture_filter 6`, nearest magnification with smooth
+mipmaps. With TAA the scene samples sharper mips (LOD bias log2 of the 3D scale
+minus 0.25, plus `r_mipbias`), since the resolve accumulates subpixel detail.
+High and Ultra add eye adaptation and the TAA reactive mask. Classic sets
+`gl_texture_filter 4` and turns all of these off. Grading is art direction,
+so the presets leave it alone. The menu is under **Options → Display → Modern Rendering**.
 
 ### Automatic per-device choice and GPU tuning
 
@@ -147,7 +400,9 @@ chain. The budget uses the **short edge**, so rotating a phone does not
 multiply its GPU workload. Initial adaptive 3D scale is 85% of the available
 budget with RT and 90% without; the controller can recover to 100%. For example,
 on a 1320-pixel short edge the A19 phone starts around 1122 internal pixels.
-Medium and Low scale the whole output when needed. MetalFX is queried before
+Medium and Low scale the whole output when needed; with `r_pixelart` that
+stretch uses nearest filtering, snapped down to an exact 1/n when within 6%,
+instead of a bilinear stretch that smears pixel art. MetalFX is queried before
 use and falls back to the TAA resolve if creation fails. iOS/iPadOS 27.0.x uses
 the GPU TAA upscaler: on the reference A19 Pro, MetalFX's asynchronous MPSGraph
 neural-compiler prewarm aborts inside LLVM despite advertising support. This
@@ -278,23 +533,75 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
 
 ## Implementation notes
 
-- `HWViewpointUniforms` gained `mRenderFeatures`, GI parameters and the probe
-  volume origin and size. The per-draw `StreamData` uses a spare `vec4` as
-  `uMaterialParams` (reflectivity, gloss, parallax).
+- `HWViewpointUniforms` gained `mRenderFeatures`, GI parameters, the probe
+  volume origin and size, `mEmissiveStrength` (√ of `r_emissive_strength`) and
+  `mMipBias`. The per-draw `StreamData` uses three spare `vec4`s:
+  `uMaterialParams` (reflectivity, gloss, parallax, particle time),
+  `uMaterialParams2` (wetness, puddles, rain ripples, G-buffer mode) and
+  `uSurfaceParams` (x = TAA reactive mask, y = fullbright emission);
+  `uDetailParms.w` carries the material's GLDEFS `emissive` factor. The
+  per-draw values are reset by `SetMaterial`.
+- The normal G-buffer's alpha is the TAA reactive mask (RGB10A2: 0, ⅓, ⅔, 1).
+  With TAA and the mask on, the G-buffer pass runs even without SSAO or SSR.
 - The irradiance volume is a `sampler2DArray` at fixed descriptor set
   binding 3, with layer = face × sizeZ + z, interpolated in z in the shader.
-- The G-buffer's SceneFog alpha encodes reflectivity. Values above 0.5 mark a
-  scene surface, and (1 − a) × 2 is its reflectivity, so cleared sky pixels
-  never reflect.
+- The G-buffer's SceneFog alpha encodes reflections. A byte value b ≥ 128
+  marks a scene surface; v = 255 − b holds 4 bits of reflectivity (v / 8) and
+  3 bits of roughness (v mod 8), dithered. Cleared sky pixels never reflect.
+  SceneNormal carries the reflection normal on reflective pixels.
+- Because reflections run after the translucent pass, translucent draws use a
+  G-buffer mode (`EGBufferMode`): pixels they cover with alpha ≥ 0.5 become
+  non-reflective, everything else (and additive, fuzz and subtractive styles)
+  leaves the G-buffer untouched, by writing alpha 1 or 0 under their own
+  blend. Portal contents are drawn the same way, so only the main view
+  reflects. GPU particles mark only their dense, non-additive parts. The TAA
+  reactive mask shares the normal target, so blended draws write it only where
+  they cover, and additive draws write a zero normal with the mask in alpha,
+  which their blend adds to the alpha alone.
+- SSAO, SSGI, volumetrics and reflections size their half-resolution buffers
+  from the 3D viewport, so their cost drops with `r_upscale`.
 - GPU particles share the scene shaders: `uMaterialParams.w > 0` switches
-  `main.vp` and `main.fp` to the particle path (w is the current time, z picks
-  the additive or alpha-blended pass). They are drawn after the translucent
-  pass of the main view only, so mirrors and portals don't show them. There is
-  no depth-buffer soft fade (the scene depth isn't readable during the scene
-  pass on this backend); particles fade near the camera, and sparks and dust
-  start just in front of the surface they came from.
+  `main.vp` and `main.fp` to the particle path (w is the current time; z is 0
+  for the alpha-blended particle pass, 1 additive, 2 rain, 3 snow). The
+  per-draw `StreamData` vectors `uParticleParams` and `uParticleParams2`
+  (formerly padding) carry the weather parameters and the soft-fade distance;
+  on ordinary draws `uParticleParams.x > 0` is the soft-fade distance of a
+  `+SOFTPARTICLE` sprite. Particles and weather are drawn in the main view
+  only, so mirrors and portals don't show them.
+- The CPU writes each particle slot once and never touches it again while it
+  can be drawn (the ring is append-only), so frames still in flight on the GPU
+  read consistent data. A new level just forgets the old range.
+- Sky exposure map: an RGBA16F 2D array texture (one layer) at fixed set 0,
+  binding 4 (`WeatherMap`, Metal texture 15), read with `texelFetch` from the
+  vertex and fragment stages. Per cell of 16 or more map units: r = height
+  where rain stops, g = sky ceiling height, b = sector light, a = 1 under open
+  sky. `uWeatherMap` (origin x, y, 1 / cell size, cells in x; w = 0 when
+  unbound) and `uWeatherParams` (cells in y, lightning flash, time) are in
+  `HWViewpointUniforms`. `WeatherCell(mapPos)` and `WeatherExposure(worldPos)`
+  in `main.vp` and `main.fp` answer "is this point under open sky", for example
+  for wet surfaces.
+- Soft particles: the half-resolution linear depth from the AO pass is bound
+  at set 0, binding 5 (`SceneLinearDepth`, Metal texture 16) after
+  `AmbientOccludeScene`, for the rest of the main view; `uSceneDepthMap` maps
+  `gl_FragCoord` to its texels. Until then, and without a G-buffer effect, a
+  null texture is bound and the fade is off. Vulkan writes a new fixed
+  descriptor set at that point, which the next render pass binds. Both new
+  textures are read without a sampler (`GL_EXT_samplerless_texture_functions`)
+  because Metal has no sampler slot left. The irradiance volume and the light
+  buffer are now visible to the vertex stage for lit particles. The OpenGL
+  backend declares the new textures but binds nothing, so weather and the soft
+  fade stay off there.
+- Checked on the Mac (Metal, and Vulkan through MoltenVK) with a UDMF test map:
+  a sky courtyard crossed by a 3D floor bridge and a roofed room. Rain falls
+  only under open sky and splashes on the ground; none falls under the bridge
+  or indoors. A lightning flash lights the courtyard but not the floor under
+  the bridge or the room. Soft smoke cards lose their hard
+  line where they cut the floor; debris thrown off the bridge lands on the
+  ground below it. DOOM2 MAP01 and MAP02 show rain only in their outdoor areas.
+  Metal API validation is clean.
 - Post-process uniforms are Vulkan push constants. The volumetric block is
-  kept at 256 bytes (`static_assert`) so it works outside MoltenVK too.
+  kept at 256 bytes (`static_assert`) so it works outside MoltenVK too; the
+  light list goes in a storage buffer (`PPRenderState::SetStorageData`).
 - Platform presets are applied through `R_SetAutoPreset`, which does nothing
   once the user picks a preset.
 - Verified: E1M1 on an M1 Max Mac (all presets), the iPhone 16e simulator
@@ -322,6 +629,12 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
   radius, and a level mesh flag (`bSky`) that some surface types left
   uninitialised now defaults to false. Runs of the same map now bake the same
   volume.
+- HDR emission, bloom, exposure, grading, weapon bloom and the reactive mask
+  were checked on E1M1 and DOOM2 MAP21 on an M4 Mac (Metal with API
+  validation, and Vulkan). Classic matches the previous build apart from
+  animation timing. At `r_upscale 0.6`, imps walking toward the camera leave a
+  doubled (TAA) or smeared (MetalFX) trail with `r_taa_reactive 0` and none
+  with it on. The neutral LUT matches no LUT apart from 8-bit rounding.
 - Testing note: console commands passed with `+` on the command line run before
   the window exists, so the automatic preset overrides them. Use
   `+"wait 2; r_preset 3; …"` when scripting captures.

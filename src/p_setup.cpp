@@ -26,6 +26,7 @@
 
 
 #include "hw_irradiance.h"
+#include "hw_weather.h"
 #include <math.h>
 #ifdef _MSC_VER
 #include <malloc.h>		// for alloca()
@@ -384,7 +385,11 @@ void FLevelLocals::ClearLevelData(bool fullgc)
 	localEventManager->Shutdown();
 	if (aabbTree) delete aabbTree;
 	if (levelMesh) delete levelMesh;
-	if (this == primaryLevel) GI_LevelUnloaded();
+	if (this == primaryLevel)
+	{
+		GI_LevelUnloaded();
+		Weather_LevelUnloaded();
+	}
 	aabbTree = nullptr;
 	levelMesh = nullptr;
 	VisualThinkerHead = nullptr;

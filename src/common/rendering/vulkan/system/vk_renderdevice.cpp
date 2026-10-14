@@ -140,6 +140,8 @@ VulkanRenderDevice::~VulkanRenderDevice()
 	delete mSkyData;
 	delete mFXParticleVertices;
 	delete mFXParticleIndices;
+	delete mWeatherVertices;
+	delete mWeatherIndices;
 	delete mViewpoints;
 	delete mLights;
 	delete mBones;
@@ -488,6 +490,12 @@ void VulkanRenderDevice::InitIrradianceVolume(int width, int height, int layers,
 	GetTextureManager()->SetIrradianceVolume(width, height, layers, rgbaHalfData);
 }
 
+bool VulkanRenderDevice::InitWeatherMap(int width, int height, TArray<uint16_t>& rgbaHalfData)
+{
+	GetTextureManager()->SetWeatherMap(width, height, rgbaHalfData);
+	return true;
+}
+
 void VulkanRenderDevice::Draw2D()
 {
 	::Draw2D(twod, *mRenderState);
@@ -569,6 +577,11 @@ FRenderState* VulkanRenderDevice::RenderState()
 void VulkanRenderDevice::AmbientOccludeScene(float m5)
 {
 	mPostprocess->AmbientOccludeScene(m5);
+}
+
+void VulkanRenderDevice::ReflectScene(float m5)
+{
+	mPostprocess->ReflectScene(m5);
 }
 
 void VulkanRenderDevice::SetSceneRenderTarget(bool useSSAO)

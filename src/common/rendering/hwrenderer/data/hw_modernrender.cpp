@@ -11,6 +11,8 @@
 #include "hw_cvars.h"
 #include "c_dispatch.h"
 #include "printf.h"
+#include <algorithm>
+#include <cmath>
 
 EXTERN_CVAR(Int, gl_ssao)
 EXTERN_CVAR(Bool, gl_bloom)
@@ -21,6 +23,7 @@ EXTERN_CVAR(Bool, gl_light_shadowmap)
 EXTERN_CVAR(Int, gl_fxaa)
 EXTERN_CVAR(Int, r_actorspriteshadow)
 EXTERN_CVAR(Float, r_actorspriteshadowfadeheight)
+EXTERN_CVAR(Int, gl_texture_filter)
 
 static bool applyingPreset;
 
@@ -52,12 +55,17 @@ FEATURE_CVAR(Float, r_autonormal_strength, 1.f, "strength of derived surface rel
 FEATURE_CVAR(Bool, r_specular, false, "specular highlights from dynamic lights on all surfaces")
 FEATURE_CVAR(Float, r_specular_strength, 1.f, "strength of derived specular highlights")
 FEATURE_CVAR(Bool, r_parallax, false, "parallax occlusion mapping from texture height estimates")
-FEATURE_CVAR(Int, r_ssr, 0, "screen-space reflections: 0 off, 1 liquids, 2 liquids and glossy floors")
+FEATURE_CVAR(Int, r_ssr, 0, "screen-space reflections: 0 off, 1 liquids, wet and GLDEFS-reflective surfaces, 2 also glossy floors")
 FEATURE_CVAR(Float, r_ssr_strength, 1.f, "strength of screen-space reflections")
+FEATURE_CVAR(Float, r_ssr_stretch, 2.5f, "vertical stretch of rough and wet-floor reflections (0 = round)")
 FEATURE_CVAR(Int, r_ssgi, 0, "screen-space indirect light from dynamic sources: 0 off, 1 on")
 FEATURE_CVAR(Float, r_ssgi_strength, 1.f, "strength of screen-space indirect light")
-FEATURE_CVAR(Int, r_volumetric, 0, "volumetric light scattering: 0 off, 1 half resolution, 2 full resolution")
+FEATURE_CVAR(Int, r_volumetric, 0, "volumetric light and height fog: 0 off, 1 half resolution, 2 full resolution")
 FEATURE_CVAR(Float, r_volumetric_strength, 1.f, "strength of volumetric light scattering")
+FEATURE_CVAR(Int, r_volumetric_shadows, 4, "most volumetric lights per frame with shadowed light shafts (0 = none)")
+FEATURE_CVAR(Int, r_volumetric_samples, 12, "ray march samples per shadowed or spot volumetric light")
+FEATURE_CVAR(Float, r_volumetric_distance, 4096.f, "distance at which volumetric lights have faded out")
+FEATURE_CVAR(Float, r_volumetric_fogscatter, 1.f, "how much brighter fog makes volumetric light")
 FEATURE_CVAR(Bool, r_taa, false, "temporal anti-aliasing with subpixel jitter and reprojected history")
 FEATURE_CVAR(Float, r_upscale, 1.f, "temporal upscaling with TAA: 3D render scale from 0.5 to 1 (1 = off); the HUD stays at full resolution")
 FEATURE_CVAR(Bool, r_upscale_metalfx, true, "use MetalFX for temporal upscaling when the Metal renderer provides it")
@@ -66,6 +74,33 @@ FEATURE_CVAR(Float, r_sharpen, 0.f, "contrast-adaptive sharpening amount (0-1)")
 FEATURE_CVAR(Float, r_vignette, 0.f, "vignette strength (0-1)")
 FEATURE_CVAR(Float, r_grain, 0.f, "film grain / dither strength (0-1)")
 FEATURE_CVAR(Int, r_gpuparticles, 0, "visual-only GPU particles for impacts, blood and explosions: 0 off, 1 normal, 2 dense")
+FEATURE_CVAR(Bool, r_emissive, false, "HDR emission: brightmapped and fullbright texels and additive lights may exceed white and drive bloom")
+FEATURE_CVAR(Float, r_emissive_strength, 4.f, "linear intensity of HDR emissive texels (1 = classic brightness)")
+FEATURE_CVAR(Float, r_bloom_threshold, 1.f, "modern bloom: linear HDR brightness where bloom starts")
+FEATURE_CVAR(Float, r_bloom_knee, 0.35f, "modern bloom: width of the soft threshold knee")
+FEATURE_CVAR(Float, r_exposure, 0.f, "exposure bias in EV applied before tone mapping")
+FEATURE_CVAR(Bool, r_autoexposure, false, "eye adaptation: adjust exposure to the average scene brightness")
+FEATURE_CVAR(Float, r_autoexposure_min, -1.5f, "eye adaptation: lowest exposure change in EV")
+FEATURE_CVAR(Float, r_autoexposure_max, 0.75f, "eye adaptation: highest exposure change in EV")
+FEATURE_CVAR(Float, r_autoexposure_speed, 1.5f, "eye adaptation speed (per second)")
+FEATURE_CVAR(Float, r_autoexposure_key, 0.04f, "eye adaptation: linear average brightness the exposure aims for")
+FEATURE_CVAR(Float, r_tonemap_white, 4.f, "linear HDR value that the filmic tone mapper maps to display white")
+FEATURE_CVAR(String, r_grading_lut, "", "colour grading LUT texture (a 32x32x32 strip, 1024x32), empty for none")
+FEATURE_CVAR(Float, r_grade_contrast, 1.f, "colour grading: contrast around middle grey")
+FEATURE_CVAR(Float, r_grade_saturation, 1.f, "colour grading: saturation")
+FEATURE_CVAR(Color, r_grade_shadowtint, 0xffffff, "colour grading: tint of the shadows (white = none)")
+FEATURE_CVAR(Color, r_grade_hightint, 0xffffff, "colour grading: tint of the highlights (white = none)")
+FEATURE_CVAR(Bool, r_weapon_prebloom, false, "draw the weapon sprite before bloom and exposure (after TAA), so its emissive parts bloom")
+FEATURE_CVAR(Bool, r_taa_reactive, false, "mark moving sprites, particles, liquids and translucency so TAA and MetalFX keep less history there")
+FEATURE_CVAR(Bool, r_sprite_depth, false, "opaque sprites write depth so TAA reprojects them")
+FEATURE_CVAR(Float, r_mipbias, 0.f, "extra texture LOD bias in the modern presets")
+
+CUSTOM_CVARD(Bool, r_pixelart, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL, "modern presets: nearest-neighbour magnification with smooth mipmaps for crisp pixel art")
+{
+	if (r_preset > RP_CLASSIC) gl_texture_filter = self ? 6 : 4;
+}
+FEATURE_CVAR(Int, r_weather_quality, 0, "map weather (rain, snow): 0 off, 1 normal, 2 high (distant rain sheets)")
+FEATURE_CVAR(Bool, r_softparticles, false, "fade particles, weather and soft sprites where they meet the scene (needs the G-buffer pass)")
 
 int R_ModernFeatureMask(bool gbuffer)
 {
@@ -75,28 +110,41 @@ int R_ModernFeatureMask(bool gbuffer)
 	if (r_gi) mask |= RF_IRRADIANCE;
 	if (r_parallax) mask |= RF_PARALLAX;
 	if (gbuffer && r_ssr > 0) mask |= RF_REFLECTIONS;
+	if (r_emissive) mask |= RF_HDR_EMISSIVE;
 	if (mask) mask |= RF_MODERN_LIGHT;
 	return mask;
 }
 
+float R_SceneMipBias(bool temporal, float upscale)
+{
+	if (r_preset <= RP_CLASSIC) return 0.f;
+	float bias = r_mipbias;
+	// The resolve accumulates subpixel detail, so sample the output resolution's mip.
+	if (temporal) bias += std::log2(std::clamp(upscale, 0.5f, 1.f)) - 0.25f;
+	return std::clamp(bias, -2.f, 2.f);
+}
+
 struct PresetValues
 {
-	bool gi, autonormal, specular, parallax, bloom, taa;
+	bool gi, autonormal, specular, parallax, bloom, taa, autoexposure;
 	int ssao, ssr, ssgi, volumetric, tonemap, shadowfilter, shadowquality, fxaa, spriteshadow, particles;
 	float sharpen, vignette, grain;
+	int weather;
+	bool softparticles;
 };
 
 static const PresetValues presets[] =
 {
 	// Sprite shadows (ss) ground actors as contact shadows: 1 default, 2 always.
 	// TAA replaces FXAA from high up; a little more sharpening restores texel detail.
-	// Particles (pt): 1 normal, 2 dense.
-	//  gi     anorm  spec   pom    bloom  taa    ssao ssr gi vol tm sf  sq    fxaa ss pt sharpen vig    grain
-	{ false, false, false, false, false, false, 0,   0,  0, 0,  0, 1, 128,  0,   1, 0, 0.f,    0.f,   0.f  }, // classic
-	{ true,  true,  true,  false, true,  false, 0,   0,  0, 0,  6, 1, 128,  0,   1, 1, 0.25f,  0.f,   0.2f }, // low
-	{ true,  true,  true,  false, true,  false, 1,   1,  0, 1,  6, 1, 256,  0,   2, 1, 0.25f,  0.15f, 0.2f }, // medium
-	{ true,  true,  true,  true,  true,  true,  2,   2,  0, 1,  6, 2, 512,  0,   2, 2, 0.4f,   0.2f,  0.25f }, // high
-	{ true,  true,  true,  true,  true,  true,  3,   2,  1, 2,  6, 3, 1024, 0,   2, 2, 0.4f,   0.2f,  0.25f }, // ultra
+	// Particles (pt): 1 normal, 2 dense. Eye adaptation (ae) from high up.
+	// Weather (wx): 1 normal, 2 high. Soft particles (soft) need SSAO's linear depth.
+	//  gi     anorm  spec   pom    bloom  taa    ae     ssao ssr gi vol tm sf  sq    fxaa ss pt sharpen vig    grain  wx soft
+	{ false, false, false, false, false, false, false, 0,   0,  0, 0,  0, 1, 128,  0,   1, 0, 0.f,    0.f,   0.f,   0, false }, // classic
+	{ true,  true,  true,  false, true,  false, false, 0,   0,  0, 0,  6, 1, 128,  0,   1, 1, 0.25f,  0.f,   0.2f,  1, false }, // low
+	{ true,  true,  true,  false, true,  false, false, 1,   1,  0, 1,  6, 1, 256,  0,   2, 1, 0.25f,  0.15f, 0.2f,  1, true  }, // medium
+	{ true,  true,  true,  true,  true,  true,  true,  2,   2,  0, 1,  6, 2, 512,  0,   2, 2, 0.4f,   0.2f,  0.25f, 2, true  }, // high
+	{ true,  true,  true,  true,  true,  true,  true,  3,   2,  1, 2,  6, 3, 1024, 0,   2, 2, 0.4f,   0.2f,  0.25f, 2, true  }, // ultra
 };
 
 void R_ApplyRenderPreset(int preset)
@@ -113,10 +161,14 @@ void R_ApplyRenderPreset(int preset)
 	r_ssgi = p.ssgi;
 	r_taa = p.taa;
 	r_volumetric = p.volumetric;
+	r_volumetric_shadows = preset >= RP_ULTRA ? 6 : preset >= RP_HIGH ? 4 : 2;
+	r_volumetric_samples = preset >= RP_ULTRA ? 16 : 12;
 	r_sharpen = p.sharpen;
 	r_vignette = p.vignette;
 	r_grain = p.grain;
 	r_gpuparticles = p.particles;
+	r_weather_quality = p.weather;
+	r_softparticles = p.softparticles;
 	gl_bloom = p.bloom;
 	gl_ssao = p.ssao;
 	gl_tonemap = p.tonemap;
@@ -127,6 +179,15 @@ void R_ApplyRenderPreset(int preset)
 	// Fading with height keeps flying monsters from casting floor-glued shadows.
 	r_actorspriteshadowfadeheight = p.spriteshadow > 1 ? 128.f : 0.f;
 	if (preset > RP_CLASSIC) gl_light_shadowmap = true;
+	// HDR emission, weapon bloom and sprite depth belong to every modern preset;
+	// the temporal mask only matters with TAA.
+	bool modern = preset > RP_CLASSIC;
+	r_emissive = modern;
+	r_weapon_prebloom = modern;
+	r_sprite_depth = modern;
+	r_taa_reactive = p.taa;
+	r_autoexposure = p.autoexposure;
+	gl_texture_filter = modern && r_pixelart ? 6 : 4;
 	applyingPreset = false;
 }
 
@@ -139,9 +200,9 @@ void R_SetAutoPreset(int preset)
 CCMD(r_presets)
 {
 	Printf("r_preset 0: classic GZDoom presentation\n");
-	Printf("r_preset 1: low - baked GI, texture relief, specular, filmic tonemap, bloom, GPU particles\n");
-	Printf("r_preset 2: medium - adds ambient occlusion, liquid reflections, half-res volumetrics\n");
-	Printf("r_preset 3: high - adds parallax, glossy floor reflections, soft shadows, TAA, dense particles\n");
+	Printf("r_preset 1: low - baked GI, texture relief, specular, filmic tonemap, bloom, GPU particles, weather\n");
+	Printf("r_preset 2: medium - adds ambient occlusion, liquid reflections, half-res volumetrics and height fog, soft particles\n");
+	Printf("r_preset 3: high - adds parallax, glossy floor reflections, soft shadows, TAA, eye adaptation, dense particles, distant rain\n");
 	Printf("r_preset 4: ultra - adds screen-space GI, full-res volumetrics, highest AO and shadow quality\n");
 	Printf("Last applied: %d%s\n", *r_preset, r_preset_auto ? " (chosen for this device)" : "");
 }
