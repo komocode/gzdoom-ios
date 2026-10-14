@@ -31,7 +31,7 @@ Apple GPUs:
 | Contact shadows | `r_actorspriteshadow 2`, `r_actorspriteshadowfadeheight` | GZDoom's projected sprite shadows, always on from medium up and faded with height, plus AO. | existing |
 | Temporal anti-aliasing | `r_taa` | The 3D projection is jittered by a subpixel Halton(2,3) offset each frame. The resolve reprojects last frame's HDR result through the depth buffer and camera motion, clips it to the current 3x3 neighbourhood in YCoCg (rejecting stale history from moving sprites and disocclusions, which have no motion vectors) and blends with luminance weights. Runs before bloom and tone mapping. History resets on teleports, menus and resolution changes. Replaces FXAA from High up. | 1 full-res pass + copy |
 | Temporal upscaling | `r_upscale` (0.5–1, 1 = off; needs `r_taa`), `r_upscale_metalfx` | The 3D scene renders into a smaller part of the scene viewport and is reconstructed to the full viewport. On the Metal renderer this is MetalFX's temporal upscaler, fed with the HDR colour, depth and camera motion vectors computed from depth and the previous camera. Elsewhere (or with `r_upscale_metalfx 0`) the TAA resolve does it: each output pixel is a Gaussian-weighted sum of the nearby jittered input samples, and the history counts for more where no sample landed near the pixel. More jitter phases are used while upscaling (16, or 32 below 0.7). Exposure, bloom, tone mapping, the weapon sprite and the HUD all run at output resolution, unlike `vid_scalefactor`, which scales the HUD too. | Scene cost × scale²; resolve replaces TAA |
-| Ray traced shadows | `vk_raytrace` (Metal renderer; restart) | On GPUs with Metal ray tracing, the scene shaders trace shadow rays for dynamic lights against an acceleration structure over the level mesh, instead of GZDoom's 2D shadow maps. Unlike the shadow maps, they respect height, 3D floors and overhangs. `gl_shadowmap_filter` sets the soft-shadow sample count. Off by default; hardware ray tracing (M3, A17 Pro and later) is recommended. | 1–28 rays per shadowed light and pixel |
+| Ray traced shadows | `vk_raytrace` (Metal renderer; restart) | On GPUs with Metal ray tracing, the scene shaders trace shadow rays for dynamic lights against an acceleration structure over the level mesh, instead of GZDoom's 2D shadow maps. Unlike the shadow maps, they respect height, 3D floors and overhangs. `gl_shadowmap_filter` sets the soft-shadow sample count. Auto mode enables this only on Apple9+ GPUs with render-stage ray tracing (A17 Pro / M3 and later). Manual mode remains available. | 1–27 rays per shadowed light and pixel |
 | Modern bloom | `gl_bloom`, `r_bloom_modern` | 13-tap downsample chain (6 levels) with a soft-knee threshold, then a tent-filtered additive upsample. Fewer passes than the classic Gaussian bloom and no flicker on small highlights. | ~12 small passes |
 | Sharpen, vignette, grain | `r_sharpen`, `r_vignette`, `r_grain` | One pass: contrast-adaptive sharpening (CAS), a vignette, and triangular grain that also removes banding. | one full-screen pass |
 | GPU particles | `r_gpuparticles` (1 normal, 2 dense) | Visual-only and stateless. Hitscan shots draw a tracer, eject a brass casing that lies on the floor for a few seconds and leave a wisp of gun smoke. Bullet impacts throw sparks, chips and a lingering dust cloud in the colour of the surface that was hit, sprayed along its normal and faded softly where they meet that surface and the floor. Blood throws droplets, explosions throw a fireball, embers, debris and rising smoke, and glowing projectiles burst in their light's colour. Each particle is written once into a ring of persistent vertex memory; the vertex shader evaluates the motion in closed form (gravity, drag, resting on the floor, sparks stretched along their velocity), so the CPU simulates nothing per frame. Game particles, RNG, savegames and netplay are untouched. | Draws only the live part of a 16384-particle ring; 2 draws |
@@ -110,35 +110,148 @@ off, which keeps the platform from changing it again.
 All presets above Classic enable the modern bloom and dynamic-light shadow
 maps. The menu is under **Options → Display → Modern Rendering**.
 
-### Automatic per-device choice
+### Automatic per-device choice and GPU tuning
 
-`r_preset_auto` (default on) lets the platform choose:
+`r_preset_auto` (default on) selects a capability-based starting budget. The
+native Metal backend also uses completed command-buffer GPU timings to tune it.
+These are estimates for stock maps, **not measured FPS guarantees**:
 
-| Device | Preset | Notes |
-|---|---|---|
-| Mac, Apple Silicon, < 16 GB | High | chosen when the window is created |
-| Mac, Apple Silicon, ≥ 16 GB | Ultra | Pro/Max class |
-| iPhone/iPad A12 (Apple GPU family 5) | Low | 720p, 60 fps |
-| A13 with ≥ 3 GB | Medium | 1080p |
-| A14 / M1 iPad with ≥ 5 GB | High | 1440p 3D, 120 Hz where available |
-| A16+ / M-series iPad with ≥ 7 GB | Ultra | 1600p 3D |
-| Apple TV 4K (2nd gen, A12) | High | 1440p 3D, on mains power |
-| Apple TV 4K (3rd gen, A15) | Ultra | 2160p |
+| Device class | Initial preset | FPS target | Maximum 3D short edge | Automatic RT |
+|---|---|---|---|---|
+| A10 / A12 | Low | 60 | 720 | off |
+| A13+ with at least 3 GiB usable RAM | Medium | 60 | 1080 | off |
+| A14 / M1 iPad with at least 5 GiB | High | 60 | 1440 | off |
+| A17 Pro iPad mini | High | 60 | 1200 | on |
+| A17 Pro / A18 phone class | High | 60 | 1200 | on |
+| A19-class phone with at least 7 GiB | Ultra | 60 | 1440 | on |
+| M-series Pro iPad with Apple9+ GPU | Ultra | 60 | 1600 | on |
+| Apple Silicon Mac | High | 60 on M1/M2; up to 120 on Apple9+ | 1440 | Apple9+ only |
+| Mac with at least 16 GiB RAM and 10 GiB GPU working-set recommendation | Ultra | 60 on M1/M2; up to 120 on Apple9+ | 1600 on M1/M2; 1800 on Apple9+ | Apple9+ only |
+| Apple TV HD (A8) | Low | 60 | 720 | off |
+| Apple TV 4K, 1st / 2nd generation (A10X / A12) | Medium | 60 | 1080 | off |
+| Apple TV 4K, 3rd generation (A15) | High | 60 | 1080 | off |
+| Newer TV GPU with Apple9+ and at least 5 GiB usable RAM | High | 60 | 1440 | only if render-stage RT is reported |
 
-The heights are the 3D render budget. High and Ultra use TAA, which replaces
-MSAA, and upscale temporally to an output up to 1.25 times taller (never above
-the display), so the HUD and post-processing are sharper at the same 3D cost.
-Low and Medium render at the budget height with MSAA, and the output is scaled
-with `vid_scalefactor`.
+The display refresh rate caps every target. The Mac uses the active window's
+display. GPU family, render-stage ray tracing, usable RAM, recommended GPU
+working set, device type, and MetalFX support are queried at runtime. RAM alone
+never implies hardware ray tracing. The M1 Max uses shadow maps automatically;
+Metal supports software traversal there, but it has no dedicated RT hardware.
+See [Apple's capability tables](https://developer.apple.com/metal/feature-sets/).
 
-Thermal state and Low Power Mode lower the preset at runtime:
+High and Ultra use TAA instead of MSAA. With MetalFX, output can be up to 1.25
+times the 3D budget, capped by the display, while the HUD and post-processing stay
+at output resolution. With the TAA fallback, the output is capped at the 3D
+budget instead, keeping the same scene detail without an oversized postprocess
+chain. The budget uses the **short edge**, so rotating a phone does not
+multiply its GPU workload. Initial adaptive 3D scale is 85% of the available
+budget with RT and 90% without; the controller can recover to 100%. For example,
+on a 1320-pixel short edge the A19 phone starts around 1122 internal pixels.
+Medium and Low scale the whole output when needed. MetalFX is queried before
+use and falls back to the TAA resolve if creation fails. iOS/iPadOS 27.0.x uses
+the GPU TAA upscaler: on the reference A19 Pro, MetalFX's asynchronous MPSGraph
+neural-compiler prewarm aborts inside LLVM despite advertising support. This
+failure cannot be caught as a nil return. Hardware ray tracing stays enabled;
+macOS MetalFX remains available.
 
-- "Fair" or Low Power Mode caps the preset at Medium (and SSAO and bloom off,
-  as before).
-- "Serious" or worse drops to Low and 35 fps. Baked GI and relief stay on there
-  because they cost almost nothing per pixel.
+`r_adaptive_quality` (default on) waits three seconds and at least 60 gameplay
+samples, then smooths GPU and presentation times. Sustained GPU load above 90%
+of the frame budget, or missed frame deadlines with substantial GPU load,
+reduces 3D scale in six-percentage-point steps to 82% of its ceiling. If that
+is insufficient, it first reduces screen-space GI, volumetrics and shadow rays
+before lowering pixels further to a 70% floor; then reflection coverage, parallax and AO; then
+shadows and the remaining expensive effects. A persistently overloaded 120-Hz
+profile can fall back to 60 FPS. If the full-output passes still exceed the
+budget, output resolution can fall in 10% steps to 50% of its ceiling as a last
+resort, including the HUD; output resolution recovers first. Eight seconds of substantial headroom are
+required to recover a step, with settling time between changes. Restoring a
+higher FPS target requires headroom at that higher target's budget too.
 
-This is implemented in `src/common/platform/ios/ios_hardware_policy.h`.
+Menus, paused gameplay, inactive apps, background gaps, invalid timings and
+isolated stalls do not drive the controller. A CPU-bound mod can still miss its
+target: the controller avoids reducing pixels when GPU load is low, and does not
+restore quality while presentation is already missing the target. Mobile RT starts with a single height-correct shadow ray per light; desktop
+RT starts with nine and can drop to one, instead of assuming Ultra's 27 rays
+fit every GPU.
+Both traced and shadow-map scene shaders are compiled during startup. Thermal
+and load changes can switch between those caches without recompiling in gameplay
+or restarting. This removes RT shader register pressure, rather than merely
+skipping shadow rays in the same shader. A larger recovery margin is required
+before restoring RT to avoid repeated toggles; shadow-map-only devices use the
+normal effect-recovery margin.
+
+Low Power Mode or fair thermal pressure caps at Medium, 60 FPS and 1080 pixels,
+with AO, bloom and automatic traced shadows off. Serious/critical pressure caps
+at Low, 35 FPS and 720 pixels. Normal conditions restore the capability budget
+and restart measurement. The Metal frame limiter also respects these caps when
+VSync is enabled. The Vulkan fallback retains static capability/thermal budgets.
+
+Choosing a preset manually disables automatic control. `r_adaptive_quality 0`
+keeps the static device budget; `r_preset_auto 0` stops automatic changes.
+`r_raytrace_auto 0` uses the existing `vk_raytrace` manual preference at the next
+restart. The **Automatic quality FPS target** menu (`r_adaptive_targetfps`) lets
+you opt into 120 FPS on a capable display, with more resolution/effect reductions;
+0 keeps the fidelity-first estimate. All controls are in **Modern Rendering**. `r_apple_status` prints
+the selected preset, target, 3D scale, effect reduction, active shadows, upscaler,
+smoothed GPU milliseconds and observed presentation rate. `r_adaptive_debug 1`
+logs these measurements every five seconds for validation (off by default, not
+saved). A target is not a benchmark result.
+
+The shared policy and feedback controller are in
+`src/common/platform/apple/apple_graphics_policy.h`. The portable checks include
+all four reference device classes, older GPUs, capability rejection, rotation,
+thermal/power limits, sustained overload, recovery, pauses and invalid timings:
+
+```sh
+xcrun clang++ -std=c++17 -Isrc/common/platform/ios \
+  ios/Tests/hardware_policy.cpp -o /tmp/gzdoom-hardware-policy
+/tmp/gzdoom-hardware-policy
+```
+
+### Apple TV extrapolation
+
+The TV budgets above are **unmeasured estimates**, revised using the phone/iPad
+spot checks. Apple identifies the TV chips as
+[A8](https://support.apple.com/en-gb/111928),
+[A10X](https://support.apple.com/en-us/111929),
+[A12](https://support.apple.com/en-us/111922), and
+[A15](https://support.apple.com/en-us/111839). GPU family describes capabilities,
+not a performance ranking: A10X should not automatically receive a lower budget
+than A12. Both therefore start at Medium / 1080p; A15 adds
+High's parallax, glossy reflections and TAA at the same pixel ceiling. TV High
+starts at 90% scene scale (about 972p), and can recover to 1080p. Low/Medium
+start at their pixel ceiling and use FXAA; none of these TV profiles uses MSAA.
+
+A 3840×2160 render has four times the pixels of 1920×1080 before extra effects.
+The measured A17 Pro mini already needed resolution/effect reductions, so the
+older A15 is no longer assumed to sustain Ultra / 2160p. The TV display mode
+does not raise its GPU budget: the app scales its budgeted output to the
+display, including the HUD. tvOS uses the GPU TAA path for High rather than
+MetalFX, and A8/A10X/A12/A15 have no hardware RT; they use shadow maps. No cooling
+bonus is assumed (the A15 TV has a
+[passive thermal design](https://www.apple.com/cl/environment/pdf/products/appletv/Apple_TV_4K_PER_Oct2022.pdf)).
+
+All TV tiers target 60 FPS or the actual HDMI refresh rate, whichever is lower,
+and run the same GPU/frame-time feedback and thermal policy as iOS. Simulators
+remain on their separate conservative profile. Newer GPU capabilities can raise
+the starting ceiling to 1440p; they do not imply native 4K or Ultra. These are
+policy and build checks only: the native tvOS arm64, iOS arm64 and macOS arm64
+builds passed, along with sanitized and optimized portable policy checks. This
+revision was not run on a TV, so frame rate, image quality and sustained thermals
+there remain unverified.
+
+### Reference-device checks (2026-10-14)
+
+The Mac arm64 and iOS arm64 builds pass, as do the portable policy/controller
+checks with address/undefined-behavior sanitizers and with release optimization.
+Short E1M1 runs on the available iPhone 17 Pro, A17 Pro iPad mini, M4 iPad and M1
+Max established the starting estimates above. The M4 reached 60 FPS with traced
+shadows active; the mini reached about 59 FPS after the raster/output fallback.
+The phone reached 60 FPS under its thermal fallback in an earlier run; its final
+sample was interrupted when the app was closed. These are local spot checks,
+not guarantees for other maps or mods or a full sustained thermal benchmark.
+The MetalFX compatibility guard comes from the phone's actual crash report:
+MPSGraph's ANE prewarm compiler aborted while advertising temporal support.
 
 ## Apple Watch
 

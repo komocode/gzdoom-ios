@@ -394,7 +394,7 @@ enum class MtlShaderLayout { Scene, PostProcess };
 class MtlShaderManager
 {
 public:
-	MtlShaderManager(MetalRenderDevice *fb);
+	MtlShaderManager(MetalRenderDevice *fb, bool raytracing);
 
 	MtlShaderProgram *GetEffect(int effect, EPassType passType);
 	MtlShaderProgram *Get(unsigned int eff, bool alphateston, EPassType passType);
@@ -409,6 +409,7 @@ private:
 	MtlShaderProgram LoadProgram(const char *name, const char *vert_lump, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass);
 
 	MetalRenderDevice *fb = nullptr;
+	bool mRaytracing = false;
 
 	std::vector<MtlShaderProgram> mMaterialShaders[MAX_PASS_TYPES];
 	std::vector<MtlShaderProgram> mMaterialShadersNAT[MAX_PASS_TYPES];

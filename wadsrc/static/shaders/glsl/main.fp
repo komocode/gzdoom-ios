@@ -427,8 +427,8 @@ float shadowAttenuation(vec4 lightpos, float lightcolorA)
 		vec3 ydir = cross(direction, xdir);
 
 		float sum = 0.0;
-		int step_count = uShadowmapFilter * 9;
-		for (int i = 0; i <= step_count; i++)
+		int step_count = clamp(uShadowmapFilter, 1, 3) * 9;
+		for (int i = 0; i < step_count; i++)
 		{
 			vec3 pos = target + xdir * softshadow[i].x + ydir * softshadow[i].y;
 			sum += traceHit(origin, normalize(pos - origin), dist) ? 0.0 : 1.0;

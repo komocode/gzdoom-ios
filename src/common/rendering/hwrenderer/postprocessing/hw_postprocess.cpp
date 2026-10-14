@@ -1574,7 +1574,11 @@ bool PPTemporalAA::PlatformUpscale(PPRenderState *renderstate, const TemporalUni
 	}
 
 	// The projection was offset by Jitter (scene UV units) this frame.
-	screen->PlatformTemporalUpscale(&UpscaleColor, &UpscaleDepth, &UpscaleMotion, &UpscaleOutput, u.Jitter.X * inputWidth, u.Jitter.Y * inputHeight, reset);
+	if (!screen->PlatformTemporalUpscale(&UpscaleColor, &UpscaleDepth, &UpscaleMotion, &UpscaleOutput, u.Jitter.X * inputWidth, u.Jitter.Y * inputHeight, reset))
+	{
+		renderstate->PopGroup();
+		return false; // Use the TAA resolve this frame if MetalFX allocation failed.
+	}
 
 	copy.Scale = { 1.0f, 1.0f };
 	copy.Offset = { 0.0f, 0.0f };

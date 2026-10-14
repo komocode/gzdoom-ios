@@ -31,17 +31,41 @@
 #include "printf.h"
 #include "textures.h"
 #include "hw_levelmesh.h"
+#include "hw_modernrender.h"
+#include "c_dispatch.h"
+#include "gamestate.h"
+#include "menustate.h"
+#include "i_interface.h"
+#include <chrono>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
+#import <Cocoa/Cocoa.h>
+#endif
 
 EXTERN_CVAR(Bool, vk_raytrace)
+EXTERN_CVAR(Int, vid_maxfps)
+EXTERN_CVAR(Int, gl_multisample)
+EXTERN_CVAR(Int, gl_fxaa)
+EXTERN_CVAR(Float, gl_texture_filter_anisotropic)
+EXTERN_CVAR(Float, vid_scalefactor)
+EXTERN_CVAR(Int, vid_scalemode)
+EXTERN_CVAR(Bool, vid_scale_linear)
 
 extern bool gpuStatActive;
 extern bool keepGpuStatActive;
 extern FString gpuStatOutput;
+extern bool AppActive;
 
 extern "C" void *objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void *pool);
 
 static void *framePool;
+
+static double AutoQualityTime()
+{
+	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 MetalRenderDevice::MetalRenderDevice(CAMetalLayer *metalLayer, bool fullscreen) : Super(nullptr, fullscreen), layer(metalLayer)
 {
@@ -87,9 +111,26 @@ void MetalRenderDevice::InitializeState()
 	uniformblockalignment = 256;
 	maxuniformblock = 65536;
 
-	// Ray traced shadows replace the shadow maps when the GPU supports Metal ray
-	// tracing. Shaders are compiled for it at startup, so changing it needs a restart.
-	mRaytracing = vk_raytrace && device.supportsRaytracing;
+	// Compile traced and shadow-map shaders at startup when RT is selected.
+	// Automatic quality can then switch between them during gameplay.
+	for (int f = 10; f >= 1; --f)
+		if ([device supportsFamily:(MTLGPUFamily)(1000 + f)]) { mAutoCaps.appleFamily = f; break; }
+	mAutoCaps.memoryBytes = NSProcessInfo.processInfo.physicalMemory;
+	mAutoCaps.simulator = TARGET_OS_SIMULATOR;
+	mAutoCaps.raytracingFromRender = device.supportsRaytracingFromRender;
+	mAutoCaps.temporalUpscaler = SupportsPlatformUpscaler();
+	mAutoCaps.gpuWorkingSetBytes = device.recommendedMaxWorkingSetSize;
+#if TARGET_OS_IPHONE
+	mAutoCaps.television = TARGET_OS_TV;
+	mAutoCaps.tablet = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+#else
+	mAutoCaps.desktop = true;
+#endif
+	// Manual RT preferences take effect on restart; automatic selection also
+	// requires dedicated intersection hardware, not software traversal alone.
+	mRaytracing = (r_preset_auto && r_raytrace_auto ? AppleGraphics::HardwareRaytracing(mAutoCaps) : bool(vk_raytrace))
+		&& mAutoCaps.raytracingFromRender;
+	mRaytracingConfigured = mRaytracing;
 	mRaytrace.reset(new MtlRaytrace(this));
 	if (mRaytracing)
 		mRaytrace->SetLevelMesh(nullptr);
@@ -104,7 +145,9 @@ void MetalRenderDevice::InitializeState()
 	mActiveRenderBuffers = mScreenBuffers.get();
 
 	mPostprocess.reset(new MtlPostprocess(this));
-	mShaderManager.reset(new MtlShaderManager(this));
+	mShaderManager.reset(new MtlShaderManager(this, mRaytracing));
+	if (mRaytracing)
+		mAlternateShaderManager.reset(new MtlShaderManager(this, false));
 
 	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight());
 	mSkyData = new FSkyVertexBuffer;
@@ -115,6 +158,152 @@ void MetalRenderDevice::InitializeState()
 	mRenderState.reset(new MtlRenderState(this));
 
 	Printf("Metal device: %s%s\n", device.name.UTF8String, mRaytracing ? ", ray traced shadows" : "");
+	UpdateAutoQuality(0, 0);
+}
+
+void MetalRenderDevice::ApplyAutoQuality()
+{
+	if (!r_preset_auto) return;
+	const auto &s = mAutoSettings;
+	int reduction = r_adaptive_quality ? mAutoQuality.reduction : 0;
+	if (mShadersReady && mRaytracingConfigured)
+	{
+		bool trace = (!r_raytrace_auto || s.raytracing) && reduction < 3;
+		if (trace != mRaytracing)
+		{
+			mShaderManager.swap(mAlternateShaderManager);
+			mRaytracing = trace;
+		}
+	}
+	R_ApplyRenderPreset(s.preset);
+	vid_maxfps = r_adaptive_quality ? mAutoQuality.fps : s.fps;
+	gl_multisample = s.msaa;
+	gl_fxaa = s.fxaa;
+	gl_ssao = s.ssao;
+	gl_bloom = s.bloom;
+	gl_texture_filter_anisotropic = s.anisotropy;
+	// Mobile keeps height-correct traced shadows with one ray. Desktop starts
+	// with nine, rather than assuming Ultra's 27 rays fit every GPU.
+	if (mRaytracing)
+	{
+		gl_shadowmap_filter = mAutoCaps.desktop ? 1 : 0;
+		if (r_raytrace_auto && !s.raytracing) gl_light_shadowmap = false;
+	}
+	if (reduction >= 1)
+	{
+		r_ssgi = 0;
+		r_volumetric = std::min(int(r_volumetric), 1);
+		gl_shadowmap_filter = mRaytracing ? 0 : 1;
+		gl_ssao = std::min(int(gl_ssao), 2);
+	}
+	if (reduction >= 2)
+	{
+		r_ssr = std::min(int(r_ssr), 1);
+		r_parallax = false;
+		gl_ssao = std::min(int(gl_ssao), 1);
+	}
+	if (reduction >= 3)
+	{
+		r_ssr = 0;
+		r_volumetric = 0;
+		r_gpuparticles = 1;
+		// The precompiled raster variant removes RT register pressure as well
+		// as ray work, and keeps inexpensive shadow maps instead of no shadows.
+		gl_light_shadowmap = true;
+		gl_shadowmap_filter = 1;
+		gl_shadowmap_quality = 256;
+	}
+	if (GetClientWidth() > 0 && GetClientHeight() > 0)
+	{
+		auto resolution = AppleGraphics::SelectResolution(s, GetClientWidth(), GetClientHeight(),
+			r_adaptive_quality ? mAutoQuality.scale : 1.f, r_adaptive_quality ? mAutoQuality.presentationScale : 1.f);
+		vid_scalemode = 0;
+		vid_scalefactor = resolution.outputScale;
+		r_upscale = resolution.sceneScale;
+		vid_scale_linear = true;
+	}
+}
+
+void MetalRenderDevice::UpdateAutoQuality(double gpuMs, double seconds)
+{
+	bool enabled = r_preset_auto;
+	if (!enabled)
+	{
+		mAutoWasEnabled = false;
+		mAutoQuality.RestartMeasurements();
+		return;
+	}
+	double now = AutoQualityTime();
+	if (!mAutoWasEnabled || now - mLastPolicyTime >= 1 || mAdaptiveWasEnabled != bool(r_adaptive_quality) || mAutoTargetFps != int(r_adaptive_targetfps))
+	{
+		mLastPolicyTime = now;
+		NSProcessInfo *info = NSProcessInfo.processInfo;
+		int thermal = (int)info.thermalState;
+#if TARGET_OS_TV
+		bool low = false;
+#else
+		bool low = info.lowPowerModeEnabled;
+#endif
+#if TARGET_OS_IPHONE
+		int hz = (int)UIScreen.mainScreen.maximumFramesPerSecond;
+#else
+		NSScreen *display = [(NSWindow *)m_window screen] ?: NSScreen.mainScreen;
+		int hz = 60;
+		if (@available(macOS 12.0, *)) hz = (int)display.maximumFramesPerSecond;
+#endif
+		bool changed = !mAutoWasEnabled || thermal != mAutoThermal || low != mAutoLowPower || hz != mAutoCaps.refreshRate
+			|| mAdaptiveWasEnabled != bool(r_adaptive_quality) || mAutoTargetFps != int(r_adaptive_targetfps);
+		bool resized = GetClientWidth() != mAutoWidth || GetClientHeight() != mAutoHeight;
+		mAutoCaps.refreshRate = std::max(35, hz);
+		if (changed)
+		{
+			mAutoSettings = AppleGraphics::Select(mAutoCaps, thermal, low);
+			mAutoTargetFps = r_adaptive_targetfps;
+			if (mAutoTargetFps > 0 && !low && thermal == 0)
+				mAutoSettings.fps = std::min(mAutoCaps.refreshRate, std::clamp(mAutoTargetFps, 35, 120));
+			mAutoQuality.Reset(mAutoSettings, !r_raytrace_auto && mRaytracingConfigured);
+			mAutoThermal = thermal;
+			mAutoLowPower = low;
+			mAutoWasEnabled = true;
+			mAdaptiveWasEnabled = r_adaptive_quality;
+		}
+		if (changed || resized)
+		{
+			mAutoWidth = GetClientWidth();
+			mAutoHeight = GetClientHeight();
+			mAutoQuality.RestartMeasurements();
+			ApplyAutoQuality();
+			PrintAutoQuality();
+		}
+	}
+	bool gameplay = AppActive && (gamestate == GS_LEVEL || gamestate == GS_TITLELEVEL) && menuactive == MENU_Off && !paused && !pauseext;
+	if (gameplay && seconds > 0 && seconds < 0.25)
+		mAverageFrameMs = mAverageFrameMs == 0 ? seconds * 1000 : mAverageFrameMs + 0.05 * (seconds * 1000 - mAverageFrameMs);
+	if (r_adaptive_quality && mAutoQuality.Observe(gpuMs, seconds, mAutoSettings.fps, gameplay))
+	{
+		ApplyAutoQuality();
+		PrintAutoQuality();
+	}
+	if (r_adaptive_debug && now - mLastQualityLogTime >= 5)
+	{
+		mLastQualityLogTime = now;
+		PrintAutoQuality();
+	}
+}
+
+void MetalRenderDevice::PrintAutoQuality() const
+{
+	Printf("Apple auto quality: %s, preset %d, target %d FPS, 3D scale %.2f, output scale %.2f, effects reduction %d, RT %s, upscaler %s; GPU %.2f ms, observed %.1f FPS; thermal %d, paused %d\n",
+		r_preset_auto ? "on" : "manual", int(r_preset), int(vid_maxfps), double(r_upscale), double(vid_scalefactor), mAutoQuality.reduction,
+		mRaytracing && gl_light_shadowmap ? "on" : "off",
+		r_taa && r_upscale < 1 && r_upscale_metalfx && mAutoCaps.temporalUpscaler ? "MetalFX" : "TAA/native",
+		mAutoQuality.averageMs, mAverageFrameMs > 0 ? 1000 / mAverageFrameMs : 0, mAutoThermal, !AppActive || paused || pauseext || menuactive != MENU_Off);
+}
+
+CCMD(r_apple_status)
+{
+	if (screen && screen->Backend() == 4) static_cast<MetalRenderDevice *>(screen)->PrintAutoQuality();
+	else Printf("Apple adaptive quality requires the native Metal renderer.\n");
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -193,11 +382,14 @@ void MetalRenderDevice::Present()
 	if (mDrawable)
 		[GetDrawCommands() presentDrawable:mDrawable];
 
-	if (!mVSync)
-		FPSLimit();
-
 	FlushCommands(true);
 	mDrawable = nil;
+	// VSync controls tearing/presentation; it does not enforce our thermal or
+	// adaptive FPS cap. Submit and finish GPU work before the CPU limiter sleeps.
+	FPSLimit();
+	double now = AutoQualityTime();
+	UpdateAutoQuality(mFrameGpuTime * 1000, mLastPresentTime > 0 ? now - mLastPresentTime : 0);
+	mLastPresentTime = now;
 
 	if (gpuStatActive)
 		gpuStatOutput.Format("Metal GPU frame=%04.2f ms\n", mFrameGpuTime * 1000.0);
@@ -239,7 +431,16 @@ void MetalRenderDevice::Update()
 
 bool MetalRenderDevice::CompileNextShader()
 {
-	return mShaderManager->CompileNextShader();
+	if (mShadersReady) return true;
+	if (!mPrimaryShadersDone)
+	{
+		mPrimaryShadersDone = mShaderManager->CompileNextShader();
+		if (!mPrimaryShadersDone) return false;
+	}
+	if (mAlternateShaderManager && !mAlternateShaderManager->CompileNextShader()) return false;
+	mShadersReady = true;
+	ApplyAutoQuality();
+	return true;
 }
 
 void MetalRenderDevice::RenderTextureView(FCanvasTexture *tex, std::function<void(IntRect &)> renderFunc)
@@ -503,7 +704,7 @@ void MetalRenderDevice::AmbientOccludeScene(float m5)
 
 void MetalRenderDevice::SetLevelMesh(hwrenderer::LevelMesh *mesh)
 {
-	if (mRaytracing)
+	if (mRaytracingConfigured)
 		mRaytrace->SetLevelMesh(mesh);
 }
 
@@ -613,6 +814,15 @@ void MtlRaytrace::Build(const hwrenderer::LevelMesh *mesh)
 
 bool MetalRenderDevice::SupportsPlatformUpscaler()
 {
+	if (mUpscalerFailed) return false;
+#if TARGET_OS_IPHONE && !TARGET_OS_TV
+	// iOS/iPadOS 27.0.x advertises support, but the temporal scaler's MPSGraph
+	// ANE prewarm aborts inside LLVM on the reference A19 Pro. It is asynchronous
+	// and cannot be caught or handled by a nil return. Use the GPU TAA resolve
+	// on this affected OS line; do not disable hardware RT with the upscaler.
+	NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+	if (os.majorVersion == 27 && os.minorVersion == 0) return false;
+#endif
 #ifdef HAVE_METALFX
 	if (@available(macOS 13.0, iOS 16.0, *))
 		return [MTLFXTemporalScalerDescriptor supportsDevice:device];
@@ -620,7 +830,7 @@ bool MetalRenderDevice::SupportsPlatformUpscaler()
 	return false;
 }
 
-void MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset)
+bool MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset)
 {
 #ifdef HAVE_METALFX
 	if (@available(macOS 13.0, iOS 16.0, *))
@@ -648,7 +858,12 @@ void MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *dep
 			mTemporalScaler = scaler;
 			reset = true;
 			if (!scaler)
-				return;
+			{
+				mUpscalerFailed = true;
+				mAutoCaps.temporalUpscaler = false;
+				Printf("MetalFX could not allocate an upscaler; using TAA.\n");
+				return false;
+			}
 		}
 
 		mRenderState->EndRenderPass();
@@ -665,6 +880,8 @@ void MetalRenderDevice::PlatformTemporalUpscale(PPTexture *color, PPTexture *dep
 		scaler.depthReversed = NO;
 		scaler.reset = reset;
 		[scaler encodeToCommandBuffer:GetDrawCommands()];
+		return true;
 	}
 #endif
+	return false;
 }

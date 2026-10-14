@@ -244,7 +244,7 @@ public:
 	// and motion (previous minus current position, in UV units). jitter is this
 	// frame's projection offset in input pixels.
 	virtual bool SupportsPlatformUpscaler() { return false; }
-	virtual void PlatformTemporalUpscale(class PPTexture *color, class PPTexture *depth, class PPTexture *motion, class PPTexture *output, float jitterX, float jitterY, bool reset) {}
+	virtual bool PlatformTemporalUpscale(class PPTexture *color, class PPTexture *depth, class PPTexture *motion, class PPTexture *output, float jitterX, float jitterY, bool reset) { return false; }
 
     // Interface to hardware rendering resources
 	virtual IVertexBuffer *CreateVertexBuffer() { return nullptr; }

@@ -26,6 +26,11 @@ enum ERenderPreset
 };
 
 EXTERN_CVAR(Int, r_preset)
+EXTERN_CVAR(Bool, r_preset_auto)
+EXTERN_CVAR(Bool, r_adaptive_quality)
+EXTERN_CVAR(Bool, r_raytrace_auto)
+EXTERN_CVAR(Int, r_adaptive_targetfps)
+EXTERN_CVAR(Bool, r_adaptive_debug)
 EXTERN_CVAR(Bool, r_gi)
 EXTERN_CVAR(Float, r_gi_strength)
 EXTERN_CVAR(Float, r_gi_saturation)

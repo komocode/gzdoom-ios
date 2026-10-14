@@ -11,6 +11,7 @@
 EXTERN_CVAR(Int, vid_maxfps)
 EXTERN_CVAR(Int, vid_preferbackend)
 EXTERN_CVAR(Int, gl_multisample)
+EXTERN_CVAR(Int, gl_fxaa)
 EXTERN_CVAR(Int, gl_ssao)
 EXTERN_CVAR(Bool, gl_bloom)
 EXTERN_CVAR(Float, gl_texture_filter_anisotropic)
@@ -32,6 +33,10 @@ bool IOS_SupportsBaseVertex()
 void IOS_UpdateHardware()
 {
     if (!initialized) return;
+    // Native Metal owns the shared Apple policy and GPU feedback loop. Keep
+    // this path for the explicitly selected Vulkan backend only.
+    if (screen && screen->Backend() == 4) return;
+    if (!r_preset_auto) { lastThermal = -1; return; }
     NSProcessInfo *info = NSProcessInfo.processInfo;
     int state = (int)info.thermalState;
 #ifdef GZDOOM_TVOS
@@ -46,6 +51,7 @@ void IOS_UpdateHardware()
     R_SetAutoPreset(settings.preset);
     vid_maxfps = settings.fps;
     gl_multisample = settings.msaa;
+    gl_fxaa = settings.fxaa;
     gl_ssao = settings.ssao;
     gl_bloom = settings.bloom;
     gl_texture_filter_anisotropic = settings.anisotropy;

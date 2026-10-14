@@ -3018,11 +3018,21 @@ OptionValue "GIQuality"
 	2, "High"
 }
 
+OptionValue "AppleFrameTargets"
+{
+	0, "Device estimate (fidelity)"
+	60, "60 FPS"
+	120, "120 FPS (when supported)"
+}
+
 OptionMenu "ModernRenderMenu" protected
 {
 	Title "Modern Rendering"
 	Option "Quality preset",				r_preset,				"RenderPresets"
 	Option "Choose preset for this device",	r_preset_auto,			"OnOff"
+	Option "Adapt quality to GPU performance", r_adaptive_quality,		"OnOff"
+	Option "Automatic quality FPS target", r_adaptive_targetfps,		"AppleFrameTargets"
+	Option "Automatic hardware ray tracing (restart)", r_raytrace_auto,	"OnOff"
 	StaticText " "
 	StaticText "Lighting", 1
 	Option "Baked global illumination",		r_gi,					"OnOff"
@@ -3034,7 +3044,7 @@ OptionMenu "ModernRenderMenu" protected
 	Option "Volumetric light",				r_volumetric,			"VolumetricModes"
 	Slider "Volumetric strength",			r_volumetric_strength,	0.0, 3.0, 0.1, 1
 	Option "Dynamic light shadows",			gl_light_shadowmap,		"OnOff"
-	Option "Ray traced shadows (Metal, restart)",	vk_raytrace,		"OnOff"
+	Option "Manual ray traced shadows (restart)",	vk_raytrace,		"OnOff"
 	StaticText " "
 	StaticText "Surfaces", 1
 	Option "Texture relief",				r_autonormal,			"OnOff"

@@ -3,6 +3,7 @@
 #include "gl_sysfb.h"
 #include "engineerrors.h"
 #include "mtl_objects.h"
+#include "common/platform/apple/apple_graphics_policy.h"
 
 class MtlRenderState;
 class MtlPostprocess;
@@ -28,6 +29,7 @@ public:
 	MtlRenderBuffers *GetBuffers() { return mActiveRenderBuffers; }
 	MtlRaytrace *GetRaytrace() { return mRaytrace.get(); }
 	bool RaytracingEnabled() const { return mRaytracing; }
+	void PrintAutoQuality() const;
 
 	// Draw commands run after the uploads queued for the same frame.
 	id<MTLCommandBuffer> GetDrawCommands();
@@ -65,7 +67,7 @@ public:
 	void SetLevelMesh(hwrenderer::LevelMesh *mesh) override;
 
 	bool SupportsPlatformUpscaler() override;
-	void PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset) override;
+	bool PlatformTemporalUpscale(PPTexture *color, PPTexture *depth, PPTexture *motion, PPTexture *output, float jitterX, float jitterY, bool reset) override;
 	void UpdateShadowMap() override;
 	void SetSaveBuffers(bool yes) override;
 	void ImageTransitionScene(bool unknown) override;
@@ -92,11 +94,14 @@ private:
 	void RenderTextureView(FCanvasTexture *tex, std::function<void(IntRect &)> renderFunc) override;
 	void CopyScreenToBuffer(int w, int h, uint8_t *data) override;
 	void Present();
+	void UpdateAutoQuality(double gpuMs, double seconds);
+	void ApplyAutoQuality();
 
 	std::unique_ptr<MtlBufferManager> mBufferManager;
 	std::unique_ptr<MtlSamplerManager> mSamplerManager;
 	std::unique_ptr<MtlTextureManager> mTextureManager;
 	std::unique_ptr<MtlShaderManager> mShaderManager;
+	std::unique_ptr<MtlShaderManager> mAlternateShaderManager;
 	std::unique_ptr<MtlRenderBuffers> mScreenBuffers;
 	std::unique_ptr<MtlRenderBuffers> mSaveBuffers;
 	std::unique_ptr<MtlPostprocess> mPostprocess;
@@ -113,7 +118,20 @@ private:
 	bool mVSync = false;
 	bool mUnifiedMemory = true;
 	bool mRaytracing = false;
+	bool mRaytracingConfigured = false;
+	bool mPrimaryShadersDone = false, mShadersReady = false;
+	bool mUpscalerFailed = false;
 	double mFrameGpuTime = 0.0;	// seconds of GPU time in command buffers committed this frame
+	AppleGraphics::Capabilities mAutoCaps{};
+	AppleGraphics::Settings mAutoSettings{};
+	AppleGraphics::AdaptiveQuality mAutoQuality;
+	bool mAutoWasEnabled = false;
+	bool mAdaptiveWasEnabled = false;
+	int mAutoThermal = -1, mAutoWidth = 0, mAutoHeight = 0;
+	int mAutoTargetFps = -1;
+	bool mAutoLowPower = false;
+	double mLastPresentTime = 0, mLastPolicyTime = 0, mAverageFrameMs = 0;
+	double mLastQualityLogTime = 0;
 };
 
 class CMetalError : public CEngineError

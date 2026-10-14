@@ -30,7 +30,7 @@ static void AddBinding(CompilerMSL &msl, spv::ExecutionModel stage, uint32_t set
 	msl.add_msl_resource_binding(b);
 }
 
-MtlShaderManager::MtlShaderManager(MetalRenderDevice *fb) : fb(fb)
+MtlShaderManager::MtlShaderManager(MetalRenderDevice *fb, bool raytracing) : fb(fb), mRaytracing(raytracing)
 {
 	static bool glslangReady = false;
 	if (!glslangReady)
@@ -42,93 +42,96 @@ MtlShaderManager::MtlShaderManager(MetalRenderDevice *fb) : fb(fb)
 
 id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout)
 {
-	// Ray queries need SPIR-V 1.4.
-	bool vulkan12 = layout == MtlShaderLayout::Scene && fb->RaytracingEnabled();
-	std::vector<unsigned int> spirv;
-	try
+	@autoreleasepool
 	{
-		spirv = ShaderBuilder()
-			.Type(vertex ? ShaderType::Vertex : ShaderType::Fragment)
-			.AddSource(name, glsl.GetChars())
-			.OnIncludeLocal(VkShaderManager::OnInclude)
-			.OnIncludeSystem(VkShaderManager::OnInclude)
-			.CreateSpirv(name, vulkan12);
-	}
-	catch (const std::exception &e)
-	{
-		I_FatalError("Metal: could not compile %s: %s", name, e.what());
-	}
+		// Ray queries need SPIR-V 1.4.
+		bool vulkan12 = layout == MtlShaderLayout::Scene && mRaytracing;
+		std::vector<unsigned int> spirv;
+		try
+		{
+			spirv = ShaderBuilder()
+				.Type(vertex ? ShaderType::Vertex : ShaderType::Fragment)
+				.AddSource(name, glsl.GetChars())
+				.OnIncludeLocal(VkShaderManager::OnInclude)
+				.OnIncludeSystem(VkShaderManager::OnInclude)
+				.CreateSpirv(name, vulkan12);
+		}
+		catch (const std::exception &e)
+		{
+			I_FatalError("Metal: could not compile %s: %s", name, e.what());
+		}
 
-	std::string source;
-	std::string entry;
-	try
-	{
-		CompilerMSL msl(std::move(spirv));
-		auto options = msl.get_msl_options();
+		std::string source;
+		std::string entry;
+		try
+		{
+			CompilerMSL msl(std::move(spirv));
+			auto options = msl.get_msl_options();
 #if TARGET_OS_IPHONE
-		options.platform = CompilerMSL::Options::iOS;
+			options.platform = CompilerMSL::Options::iOS;
 #else
-		options.platform = CompilerMSL::Options::macOS;
+			options.platform = CompilerMSL::Options::macOS;
 #endif
-		options.set_msl_version(2, 4);
-		msl.set_msl_options(options);
+			options.set_msl_version(2, 4);
+			msl.set_msl_options(options);
 
-		// Vulkan's clip space has y pointing down.
-		auto common = msl.get_common_options();
-		common.vertex.flip_vert_y = true;
-		msl.set_common_options(common);
+			// Vulkan's clip space has y pointing down.
+			auto common = msl.get_common_options();
+			common.vertex.flip_vert_y = true;
+			msl.set_common_options(common);
 
-		spv::ExecutionModel model = vertex ? spv::ExecutionModelVertex : spv::ExecutionModelFragment;
-		if (layout == MtlShaderLayout::Scene)
-		{
-			AddBinding(msl, model, 1, 0, MTLBUF_VIEWPOINT, 0, 0);
-			AddBinding(msl, model, 1, 1, MTLBUF_MATRICES, 0, 0);
-			AddBinding(msl, model, 1, 2, MTLBUF_STREAM, 0, 0);
-			AddBinding(msl, model, 1, 3, MTLBUF_LIGHTS, 0, 0);
-			AddBinding(msl, model, 1, 4, MTLBUF_BONES, 0, 0);
-			AddBinding(msl, model, kPushConstDescSet, kPushConstBinding, MTLBUF_PUSHCONSTANTS, 0, 0);
-			for (uint32_t i = 0; i < MTLTEX_MATERIAL_COUNT; i++)
-				AddBinding(msl, model, 2, i, 0, i, i);
-			AddBinding(msl, model, 0, 0, 0, MTLTEX_SHADOWMAP, MTLTEX_SHADOWMAP);
-			AddBinding(msl, model, 0, 1, 0, MTLTEX_LIGHTMAP, MTLTEX_LIGHTMAP);
-			AddBinding(msl, model, 0, 3, 0, MTLTEX_IRRADIANCE, MTLTEX_IRRADIANCE);
-			AddBinding(msl, model, 0, 2, MTLBUF_ACCELERATION, 0, 0);
+			spv::ExecutionModel model = vertex ? spv::ExecutionModelVertex : spv::ExecutionModelFragment;
+			if (layout == MtlShaderLayout::Scene)
+			{
+				AddBinding(msl, model, 1, 0, MTLBUF_VIEWPOINT, 0, 0);
+				AddBinding(msl, model, 1, 1, MTLBUF_MATRICES, 0, 0);
+				AddBinding(msl, model, 1, 2, MTLBUF_STREAM, 0, 0);
+				AddBinding(msl, model, 1, 3, MTLBUF_LIGHTS, 0, 0);
+				AddBinding(msl, model, 1, 4, MTLBUF_BONES, 0, 0);
+				AddBinding(msl, model, kPushConstDescSet, kPushConstBinding, MTLBUF_PUSHCONSTANTS, 0, 0);
+				for (uint32_t i = 0; i < MTLTEX_MATERIAL_COUNT; i++)
+					AddBinding(msl, model, 2, i, 0, i, i);
+				AddBinding(msl, model, 0, 0, 0, MTLTEX_SHADOWMAP, MTLTEX_SHADOWMAP);
+				AddBinding(msl, model, 0, 1, 0, MTLTEX_LIGHTMAP, MTLTEX_LIGHTMAP);
+				AddBinding(msl, model, 0, 3, 0, MTLTEX_IRRADIANCE, MTLTEX_IRRADIANCE);
+				AddBinding(msl, model, 0, 2, MTLBUF_ACCELERATION, 0, 0);
+			}
+			else
+			{
+				AddBinding(msl, model, kPushConstDescSet, kPushConstBinding, MTLBUF_PP_UNIFORMS, 0, 0);
+				for (uint32_t i = 0; i < 16; i++)
+					AddBinding(msl, model, 0, i, MTLBUF_PP_STORAGE + i, i, i);
+			}
+
+			source = msl.compile();
+			entry = msl.get_cleansed_entry_point_name("main", model);
 		}
-		else
+		catch (const std::exception &e)
 		{
-			AddBinding(msl, model, kPushConstDescSet, kPushConstBinding, MTLBUF_PP_UNIFORMS, 0, 0);
-			for (uint32_t i = 0; i < 16; i++)
-				AddBinding(msl, model, 0, i, MTLBUF_PP_STORAGE + i, i, i);
+			I_FatalError("Metal: could not translate %s: %s", name, e.what());
 		}
 
-		source = msl.compile();
-		entry = msl.get_cleansed_entry_point_name("main", model);
+		MTLCompileOptions *options = [MTLCompileOptions new];
+		options.languageVersion = MTLLanguageVersion2_4;
+		NSError *error = nil;
+		id<MTLLibrary> library = [fb->device newLibraryWithSource:@(source.c_str()) options:options error:&error];
+		if (!library)
+		{
+			Printf(PRINT_LOG, "%s\n", source.c_str());
+			I_FatalError("Metal: could not build %s: %s", name, error.localizedDescription.UTF8String);
+		}
+		id<MTLFunction> function = [library newFunctionWithName:@(entry.c_str())];
+		if (!function)
+			I_FatalError("Metal: %s has no entry point %s", name, entry.c_str());
+		function.label = @(name);
+		return function;
 	}
-	catch (const std::exception &e)
-	{
-		I_FatalError("Metal: could not translate %s: %s", name, e.what());
-	}
-
-	MTLCompileOptions *options = [MTLCompileOptions new];
-	options.languageVersion = MTLLanguageVersion2_4;
-	NSError *error = nil;
-	id<MTLLibrary> library = [fb->device newLibraryWithSource:@(source.c_str()) options:options error:&error];
-	if (!library)
-	{
-		Printf(PRINT_LOG, "%s\n", source.c_str());
-		I_FatalError("Metal: could not build %s: %s", name, error.localizedDescription.UTF8String);
-	}
-	id<MTLFunction> function = [library newFunctionWithName:@(entry.c_str())];
-	if (!function)
-		I_FatalError("Metal: %s has no entry point %s", name, entry.c_str());
-	function.label = @(name);
-	return function;
 }
 
 MtlShaderProgram MtlShaderManager::LoadProgram(const char *name, const char *vert_lump, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass)
 {
 	MtlShaderProgram program;
-	bool raytracing = fb->RaytracingEnabled();
+	bool raytracing = mRaytracing;
 	FString vert = VkShaderManager::BuildVertexSource(vert_lump, defines, false, raytracing);
 	FString frag = VkShaderManager::BuildFragmentSource(frag_lump, material_lump, light_lump, defines, alphatest, gbufferpass, false, raytracing, raytracing);
 	program.vert = Compile(name, vert, true, MtlShaderLayout::Scene);

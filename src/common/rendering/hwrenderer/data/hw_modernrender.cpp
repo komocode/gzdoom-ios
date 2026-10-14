@@ -25,6 +25,10 @@ EXTERN_CVAR(Float, r_actorspriteshadowfadeheight)
 static bool applyingPreset;
 
 CVARD(Bool, r_preset_auto, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "let the platform choose r_preset from the device and thermal state")
+CVARD(Bool, r_adaptive_quality, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "adjust Apple auto quality from measured GPU frame time")
+CVARD(Bool, r_raytrace_auto, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "automatically use hardware ray traced shadows in Apple auto quality mode")
+CVARD(Int, r_adaptive_targetfps, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "Apple auto-quality FPS preference: 0 device estimate, or 35-120 capped by display and thermal limits")
+CVARD(Bool, r_adaptive_debug, false, 0, "print Apple quality and timing diagnostics every five seconds")
 
 CUSTOM_CVARD(Int, r_preset, -1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL, "rendering quality preset: 0 classic, 1 low, 2 medium, 3 high, 4 ultra, -1 not set")
 {

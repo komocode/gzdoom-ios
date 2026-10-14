@@ -245,7 +245,7 @@ def main():
         if args.target == 'macos':
             # open reuses a running app instance.
             wad = next(iter(sorted((ROOT / 'vendor').glob('*.WAD'))), None)
-            cmd = ['open', app, '--args', '+vid_preferbackend', '1']
+            cmd = ['open', app, '--args', '+vid_preferbackend', '4']
             if wad and args.test_wads:
                 cmd += ['-iwad', wad]
             run(cmd)

@@ -395,12 +395,13 @@ public:
 		assert(ms_window == nil);
 		ms_window = CreateWindow(STYLE_MASK_WINDOWED);
 
-		// Every Apple Silicon Mac (M1 and later) runs the high preset; machines
-		// with 16 GB or more are Pro/Max class or newer and run ultra.
+		// Static fallback for OpenGL/Vulkan. Native Metal selects capabilities
+		// and its GPU working-set budget in MetalRenderDevice instead.
 		uint64_t memory = 0;
 		size_t size = sizeof(memory);
 		sysctlbyname("hw.memsize", &memory, &size, nullptr, 0);
-		R_SetAutoPreset(memory >= (16ull << 30) ? RP_ULTRA : RP_HIGH);
+		if (V_GetBackend() != 4)
+			R_SetAutoPreset(memory >= (16ull << 30) ? RP_ULTRA : RP_HIGH);
 
 		const NSRect contentRect = [ms_window contentRectForFrameRect:[ms_window frame]];
 		SystemBaseFrameBuffer *fb = nullptr;

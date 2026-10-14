@@ -21,8 +21,9 @@ iPad, Mac, and Apple TV builds, plus an Apple Watch rendering preview.
   SPIRV-Cross, and adds ray traced dynamic-light shadows on GPUs with Metal ray
   tracing and MetalFX temporal upscaling.
 - Added GPU quality profiles based on Metal capabilities, memory, display refresh
-  rate, thermal state, and Low Power Mode. Unsupported renderer features are
-  disabled.
+  rate, thermal state, and Low Power Mode, with native Metal GPU timing feedback
+  that adapts resolution/effects and capability-gated hardware ray tracing.
+  Unsupported renderer features are disabled.
 - Added Vulkan portability support (MoltenVK remains selectable), supported
   sample-count and anisotropy limits, texture upload synchronization fixes, and a
   base-vertex fallback for older GPU families and simulators.

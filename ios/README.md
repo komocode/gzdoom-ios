@@ -76,26 +76,29 @@ quality presets) is described in [Apple rendering](../docs/apple-rendering.md).
 iPhone/iPad settings use the Metal GPU family, reported RAM, display refresh rate,
 Low Power Mode, and thermal state.
 
-| Hardware class | Starting budget | Effects |
-| --- | --- | --- |
-| A10/A12 or less than 3 GiB RAM | 60 FPS, up to 720p | 1x samples, 4x anisotropy |
-| Apple family 6+ in the 4 GB RAM class | 60 FPS, up to 1080p | 2x samples, 8x anisotropy |
-| Apple family 7+ in the 6 GB RAM class | Up to 120 Hz, 1440p 3D | TAA with temporal upscaling to up to 1.25x, 16x anisotropy, SSAO and bloom |
-| Apple family 9+ in the 8 GB RAM class | Up to 120 Hz, 1600p 3D | TAA with temporal upscaling to up to 1.25x, 16x anisotropy, SSAO and bloom |
+The native Metal renderer is the default (`vid_preferbackend 4`). Its shared
+Apple policy selects Low through Ultra from actual GPU capabilities, usable RAM,
+display refresh, device type and power/thermal state. It starts High on the A17
+Pro iPad mini, Ultra on A19 Pro phones and M4 iPad Pro (60-FPS fidelity target),
+and High/Ultra on Macs using their GPU working-set budget as well as RAM.
 
-Apple TV budgets range from 720p / 1x samples on A8 to 1080p / 2x on A10X,
-1440p 3D with TAA on A12, and 2160p with TAA on A15 or newer, at up to 60 FPS. Rendering is
-limited by drawable resolution, supported sample counts, and GPU anisotropy limits.
-Simulators use reduced budgets. Low Power Mode and heat lower quality; normal
-settings return when conditions improve. These are quality budgets, not guaranteed
-frame rates.
+Apple TV estimates target 60 FPS: A8 starts Low / 720p, A10X and A12 start
+Medium / 1080p, and A15 starts High / 1080p with TAA. These are extrapolated
+from phone/iPad behavior, not TV measurements. A 4K HDMI mode does not force a
+4K render budget; runtime feedback can lower resolution/effects further.
 
-The native Metal renderer is the default (`vid_preferbackend 4`); Vulkan through
-MoltenVK remains selectable. On GPUs with Metal ray tracing, Metal
-traces dynamic-light shadows when `vk_raytrace` is on. MetalFX performs temporal
-upscaling where available (not on tvOS). Mobile builds also exclude desktop
-OpenGL, executable-memory JIT, desktop Discord integration, and process
-launching.
+Automatic ray traced dynamic-light shadows require Apple9+ hardware and
+render-stage ray tracing; the M1 Max uses shadow maps. MetalFX is selected when
+supported, with TAA as a fallback; iOS/iPadOS 27.0.x uses TAA to avoid a verified
+MetalFX neural-compiler crash. Completed GPU timings adapt the 3D resolution
+and costly effects, then restore quality slowly when headroom returns. Targets
+are estimates, not guaranteed frame rates. Manual preset choices stop automatic
+control; `r_apple_status` reports the actual state.
+
+See [Apple rendering](../docs/apple-rendering.md) for the starting budgets,
+controller behavior, controls, and known limitations. Vulkan through MoltenVK
+remains selectable with static capability/thermal budgets. Watch uses its
+separate CPU rendering and thermal policy.
 
 ## Validation
 
