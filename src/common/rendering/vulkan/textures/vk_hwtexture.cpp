@@ -178,7 +178,12 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
 	region.imageExtent.height = h;
 	cmdbuffer->copyBufferToImage(stagingBuffer->buffer, mImage.Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	if (mipmap) mImage.GenerateMipmaps(cmdbuffer);
+	if (mipmap)
+		mImage.GenerateMipmaps(cmdbuffer);
+	else
+		VkImageTransition()
+			.AddImage(&mImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
+			.Execute(cmdbuffer);
 
 	// If we queued more than 64 MB of data already: wait until the uploads finish before continuing
 	fb->GetCommands()->TransferDeleteList->Add(std::move(stagingBuffer));

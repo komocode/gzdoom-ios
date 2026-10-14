@@ -52,6 +52,10 @@
 #include "gl_framebuffer.h"
 #include "gl_renderer.h"
 
+#ifdef GZDOOM_IOS
+#include "ios_platform.h"
+#endif
+
 #ifdef HAVE_GLES2
 #include "gles_framebuffer.h"
 #endif
@@ -178,6 +182,9 @@ namespace Priv
 
 		if (Priv::window != nullptr)
 		{
+#ifdef GZDOOM_IOS
+			IOS_AttachControls(Priv::window);
+#endif
 			// Enforce minimum size limit
 			SDL_SetWindowMinimumSize(Priv::window, VID_MIN_WIDTH, VID_MIN_HEIGHT);
 			// Tell SDL to start sending text input on Wayland.
@@ -324,13 +331,20 @@ bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface)
 {
 	assert(Priv::vulkanEnabled);
 	assert(Priv::window != nullptr);
-	return SDL_Vulkan_CreateSurface(Priv::window, instance, surface) == SDL_TRUE;
+	bool created = SDL_Vulkan_CreateSurface(Priv::window, instance, surface) == SDL_TRUE;
+#ifdef GZDOOM_IOS
+	if (created) IOS_AttachControls(Priv::window);
+#endif
+	return created;
 }
 #endif
 
 
 SDLVideo::SDLVideo ()
 {
+#ifdef GZDOOM_IOS
+	IOS_ApplyHardwareDefaults();
+#endif
 	if (SDL_Init(SDL_INIT_VIDEO) < 0)
 	{
 		fprintf(stderr, "Video initialization failed: %s\n", SDL_GetError());
@@ -348,10 +362,17 @@ SDLVideo::SDLVideo ()
 
 	if (Priv::vulkanEnabled)
 	{
-		Priv::CreateWindow(SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | (vid_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+#ifdef GZDOOM_IOS
+		if (SDL_Vulkan_LoadLibrary(IOS_MoltenVKPath()) != 0)
+			I_FatalError("Unable to load Metal/Vulkan: %s", SDL_GetError());
+#endif
+		Priv::CreateWindow(SDL_WINDOW_VULKAN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN | (vid_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
 
 		if (Priv::window == nullptr)
 		{
+#ifdef GZDOOM_IOS
+			I_FatalError("Unable to create the Metal window: %s", SDL_GetError());
+#endif
 			Priv::vulkanEnabled = false;
 		}
 	}
@@ -425,6 +446,9 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
 
 	if (fb == nullptr)
 	{
+#ifdef GZDOOM_IOS
+		I_FatalError("Metal renderer could not start. Please relaunch the app. Desktop OpenGL is unavailable on iOS.");
+#endif
 #ifdef HAVE_GLES2
 		if (V_GetBackend() != 0)
 			fb = new OpenGLESRenderer::OpenGLFrameBuffer(0, vid_fullscreen);
@@ -615,7 +639,7 @@ int SystemGLFrameBuffer::GetClientHeight()
 
 void SystemGLFrameBuffer::SetVSync( bool vsync )
 {
-#if defined (__APPLE__)
+#if defined (__APPLE__) && !defined(GZDOOM_IOS)
 	const GLint value = vsync ? 1 : 0;
 	CGLSetParameter( CGLGetCurrentContext(), kCGLCPSwapInterval, &value );
 #else

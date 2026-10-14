@@ -231,6 +231,9 @@ void HWWall::RenderTexturedWall(HWWallDispatcher*di, FRenderState &state, int rf
 	}
 #endif
 
+	// Masked mid textures keep their exact alpha shape, so only solid tiers get parallax.
+	state.SetMaterialParams(0, 0, type != RENDERWALL_M2S && type != RENDERWALL_M2SNF && type != RENDERWALL_COLOR && !(flags & HWWall::HWF_TRANSLUCENT));
+
 	if (flags & HWWall::HWF_CLAMPY && (type == RENDERWALL_M2S || type == RENDERWALL_M2SNF) && !texture->isWarped())
 	{
 		state.SetTextureClamp(true);
@@ -327,6 +330,7 @@ void HWWall::RenderTexturedWall(HWWallDispatcher*di, FRenderState &state, int rf
 	state.EnableGlow(false);
 	state.EnableGradient(false);
 	state.ApplyTextureManipulation(nullptr);
+	state.SetMaterialParams(0, 0);
 }
 
 //==========================================================================

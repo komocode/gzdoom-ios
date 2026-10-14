@@ -481,6 +481,11 @@ void VulkanRenderDevice::InitLightmap(int LMTextureSize, int LMTextureCount, TAr
 	}
 }
 
+void VulkanRenderDevice::InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData)
+{
+	GetTextureManager()->SetIrradianceVolume(width, height, layers, rgbaHalfData);
+}
+
 void VulkanRenderDevice::Draw2D()
 {
 	::Draw2D(twod, *mRenderState);

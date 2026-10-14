@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+<key>CFBundleIdentifier</key><string>${GZDOOM_BUNDLE_ID}</string>
+<key>CFBundleName</key><string>GZDoom</string>
+<key>CFBundleDisplayName</key><string>GZDoom</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>MinimumOSVersion</key><string>18.0</string>
+<key>UIDeviceFamily</key><array><integer>3</integer></array>
+<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
+<key>UILaunchScreen</key><dict/>
+<key>UIApplicationSceneManifest</key><dict>
+<key>UIApplicationSupportsMultipleScenes</key><false/>
+<key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict>
+<key>UISceneConfigurationName</key><string>Game</string>
+<key>UISceneDelegateClassName</key><string>GZDoomSceneDelegate</string>
+</dict></array></dict>
+</dict>
+<key>GCSupportedGameControllers</key><array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
+<key>GCSupportsControllerUserInteraction</key><true/>
+<key>GCSupportsMultipleMicroGamepads</key><false/>
+</dict></plist>

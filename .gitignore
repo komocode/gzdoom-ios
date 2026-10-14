@@ -1,5 +1,24 @@
-# build artifacts
-/build*
+# Local game assets
+/vendor/
+
+# Build output and downloaded dependencies
+/build*/
+build/
+cmake-build-*/
+DerivedData/
+.build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+/Makefile
+*.dSYM/
+*.xcarchive/
+*.ipa
 /wadsrc/*.pk3
 .flatpak-builder/
 *.AppImage
@@ -8,26 +27,55 @@ flatpak/
 gzdoom-crash.log
 fmodapi*linux/
 
-# generated code
+# Generated code
 /src/gitinfo.h
 
-# editor/tooling/os files
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Editor and Xcode user state
 *~
 .gdb_history
-.DS_Store
-.vs
-.idea
-.vscode
-.cache
+.vs/
+.idea/
+.vscode/
+*.xcuserstate
+xcuserdata/
 *.kate-swp
 *.geany
 
-# private dev files
+# Caches
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.swiftpm/
+
+# Local tool configuration
+/.codex/
+/.agents/
+/.claude/
+/.cursor/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+
+# Signing material and local development files
+*.mobileprovision
+*.p12
+*.pfx
+device-entitlements.plist
 *.user
 *.local
 *.log
 
-# other / unknown
+# Legacy build artifacts
 *.ncb
 *.suo
 *.pdb
@@ -40,4 +88,3 @@ fmodapi*linux/
 /llvm
 /src/gl/unused
 /mapfiles_release/*.map
-.cache/

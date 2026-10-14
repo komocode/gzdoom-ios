@@ -125,7 +125,8 @@ class LoadSaveMenu : ListMenu
 	private void SetWindows()
 	{
 		bool aspect43 = true;
-		int Width43 = screen.GetHeight() * 4 / 3;
+		// Keep both columns visible in portrait and narrow tablet windows.
+		int Width43 = min(screen.GetWidth(), screen.GetHeight() * 4 / 3);
 		int Left43 = (screen.GetWidth() - Width43) / 2;
 
 		double wScale = Width43 / 640.;
@@ -135,7 +136,7 @@ class LoadSaveMenu : ListMenu
 		savepicWidth = int(240 * wScale);
 		savepicHeight = int(180 * wScale);
 
-		FontScale = max(screen.GetHeight() / 480, 1);
+		FontScale = max(min(screen.GetHeight() / 480, Width43 / 640), 1);
 		rowHeight = int(max((NewConsoleFont.GetHeight() + 1) * FontScale, 1));
 
 		listboxLeft = savepicLeft + savepicWidth + int(20*wScale);

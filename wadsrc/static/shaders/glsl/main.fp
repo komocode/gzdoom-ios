@@ -545,6 +545,75 @@ float sampleShadowmapPCF(vec3 planePoint, float v)
 	return sum / (uShadowmapFilter * 2.0 + 1.0);
 }
 
+// Contact-hardening soft shadows. A blocker search estimates how far the
+// occluder is from the receiver; the filter widens with that gap, so shadows
+// are sharp where an object meets the floor and soft further away. Taps are
+// tent weighted and jittered per pixel to avoid banding.
+vec2 shadowmapTap(vec3 ray, float negD, float texel, float scale, float v)
+{
+	float u = fract(texel / scale);
+	vec2 dir = shadowUToDir(u);
+	ray.x = dir.x;
+	ray.z = dir.y;
+	float t = negD / dot(vWorldNormal.xyz, ray) - 1.0;
+	dir = ray.xz * t;
+	return vec2(texture(ShadowMap, vec2(u, v)).x, dot(dir, dir));
+}
+
+float sampleShadowmapSoft(vec3 planePoint, float v)
+{
+	float negD = dot(vWorldNormal.xyz, planePoint);
+	vec3 ray = planePoint;
+	if (abs(ray.z) > abs(ray.x))
+		ray.y = ray.y / abs(ray.z);
+	else
+		ray.y = ray.y / abs(ray.x);
+
+	float scale = float(textureSize(ShadowMap, 0).x);
+	float center = shadowDirToU(ray.xz) * scale;
+	float maxRadius = 1.5 + float(uShadowmapFilter) * 2.0;
+	float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+
+	// Blocker search.
+	float blockers = 0.0;
+	float blockerDist = 0.0;
+	float receiverDist = 0.0;
+	for (int i = 0; i < 6; i++)
+	{
+		float offset = (float(i) + noise - 2.5) / 2.5 * maxRadius;
+		vec2 tap = shadowmapTap(ray, negD, center + offset, scale, v);
+		receiverDist += sqrt(tap.y);
+		// Only occluders clearly in front of the receiver count; texels of the
+		// receiving wall itself at grazing angles must not.
+		if (sqrt(tap.x) < sqrt(tap.y) - 8.0)
+		{
+			blockers += 1.0;
+			blockerDist += sqrt(tap.x);
+		}
+	}
+	if (blockers == 0.0) return 1.0;
+	blockerDist /= blockers;
+	receiverDist /= 6.0;
+
+	// Penumbra for a light source about 4 map units wide, in shadow map texels.
+	const float lightSize = 4.0;
+	float penumbra = lightSize * (receiverDist - blockerDist) / max(blockerDist, 1.0);
+	float radius = clamp(penumbra / max(receiverDist, 1.0) * scale * 0.16, 0.5, maxRadius);
+
+	float sum = 0.0;
+	float weights = 0.0;
+	int taps = 4 + uShadowmapFilter * 2;
+	for (int i = 0; i < taps; i++)
+	{
+		float x = (float(i) + noise) / float(taps) * 2.0 - 1.0;
+		float w = 1.0 - abs(x);
+		vec2 tap = shadowmapTap(ray, negD, center + x * radius, scale, v);
+		sum += step(tap.y, tap.x) * w;
+		weights += w;
+	}
+	return sum / max(weights, 0.001);
+}
+
 float shadowmapAttenuation(vec4 lightpos, float shadowIndex)
 {
 	if (shadowIndex >= 1024.0)
@@ -561,6 +630,10 @@ float shadowmapAttenuation(vec4 lightpos, float shadowIndex)
 	if (uShadowmapFilter <= 0)
 	{
 		return sampleShadowmap(planePoint, v);
+	}
+	else if ((uRenderFeatures & 1) != 0) // RF_MODERN_LIGHT
+	{
+		return sampleShadowmapSoft(planePoint, v);
 	}
 	else
 	{
@@ -597,7 +670,6 @@ float spotLightAttenuation(vec4 lightpos, vec3 spotdir, float lightCosInnerAngle
 //
 //===========================================================================
 
-#if defined(NORMALMAP)
 mat3 cotangent_frame(vec3 n, vec3 p, vec2 uv)
 {
 	// get edge vectors of the pixel triangle
@@ -617,6 +689,7 @@ mat3 cotangent_frame(vec3 n, vec3 p, vec2 uv)
 	return mat3(t * invmax, b * invmax, n);
 }
 
+#if defined(NORMALMAP)
 vec3 ApplyNormalMap(vec2 texcoord)
 {
 	#define WITH_NORMALMAP_UNSIGNED
@@ -649,6 +722,136 @@ vec3 ApplyNormalMap(vec2 texcoord)
 
 //===========================================================================
 //
+// Modern lighting features (see hw_modernrender.h)
+//
+//===========================================================================
+
+const int RF_MODERN_LIGHT = 1;
+const int RF_AUTO_NORMAL = 2;
+const int RF_SPECULAR = 4;
+const int RF_IRRADIANCE = 8;
+const int RF_REFLECTIONS = 16;
+const int RF_PARALLAX = 32;
+
+bool HasFeature(int feature)
+{
+	return (uRenderFeatures & feature) != 0;
+}
+
+bool HasSurfaceNormal()
+{
+	return dot(vWorldNormal.xyz, vWorldNormal.xyz) > 0.5;
+}
+
+// Explicit gradients keep the lookups valid inside divergent control flow.
+float HeightAt(vec2 st, vec2 gx, vec2 gy)
+{
+	return grayscale(textureGrad(tex, st, gx, gy));
+}
+
+// Steep parallax mapping with the diffuse luminance as the height field.
+// Dark texels (mortar, seams, grilles) read as recessed.
+vec2 ParallaxTexCoord(vec2 st)
+{
+	vec2 gx = dFdx(st), gy = dFdy(st);
+	if (uMaterialParams.z == 0.0 || !HasSurfaceNormal() || (uTextureMode & 0xffff) != 0) return st;
+	vec3 toCamera = uCameraPos.xyz - pixelpos.xyz;
+	float dist = length(toCamera);
+	float fade = 1.0 - smoothstep(256.0, 640.0, dist);
+	if (fade <= 0.0) return st;
+
+	vec3 n = normalize(vWorldNormal.xyz);
+	mat3 tbn = cotangent_frame(n, pixelpos.xyz, st);
+	vec3 viewTS = normalize(transpose(tbn) * (toCamera / dist));
+	if (viewTS.z <= 0.05) return st;
+
+	// About four texels of depth regardless of texture size.
+	vec2 texSize = vec2(textureSize(tex, 0));
+	vec2 maxOffset = viewTS.xy / viewTS.z * (4.0 / texSize) * fade;
+	const int steps = 10;
+	float layer = 1.0 / float(steps);
+	vec2 delta = maxOffset * layer;
+	vec2 cur = st;
+	float depth = 0.0;
+	float h = 1.0 - HeightAt(cur, gx, gy);
+	float prevH = h;
+	for (int i = 0; i < steps && depth < h; i++)
+	{
+		prevH = h;
+		cur -= delta;
+		depth += layer;
+		h = 1.0 - HeightAt(cur, gx, gy);
+	}
+	// Interpolate between the last two samples.
+	float after = h - depth;
+	float before = prevH - (depth - layer);
+	float w = after / (after - before + 1e-5);
+	return mix(cur, cur + delta, clamp(w, 0.0, 1.0));
+}
+
+// Relief derived from the diffuse texture for lighting.
+vec3 AutoNormal(vec3 geomNormal, vec2 st, vec2 gx, vec2 gy)
+{
+	vec2 texel = 1.0 / vec2(textureSize(tex, 0));
+	float hL = HeightAt(st - vec2(texel.x, 0.0), gx, gy);
+	float hR = HeightAt(st + vec2(texel.x, 0.0), gx, gy);
+	float hD = HeightAt(st - vec2(0.0, texel.y), gx, gy);
+	float hU = HeightAt(st + vec2(0.0, texel.y), gx, gy);
+	float k = 2.5 * uNormalStrength;
+	vec3 bump = normalize(vec3((hL - hR) * k, (hD - hU) * k, 1.0));
+	mat3 tbn = cotangent_frame(geomNormal, pixelpos.xyz, st);
+	return normalize(tbn * bump);
+}
+
+vec3 SampleIrradianceFace(int face, vec2 uv, float z0, float z1, float t)
+{
+	float base = float(face) * uGISize.z;
+	vec3 a = texture(IrradianceVolume, vec3(uv, base + z0)).rgb;
+	vec3 b = texture(IrradianceVolume, vec3(uv, base + z1)).rgb;
+	return mix(a, b, t);
+}
+
+// Ambient cube lookup. normal is in world space (x, height, y); zero for sprites.
+vec3 SampleIrradiance(vec3 normal)
+{
+	vec3 n = normal.xzy;
+	vec3 mapPos = pixelpos.xzy;
+	float spacing = uGIOrigin.w;
+	vec3 p = (mapPos + n * (spacing * 0.5) - uGIOrigin.xyz) / spacing;
+	vec2 uv = (p.xy + 0.5) / uGISize.xy;
+	float z = clamp(p.z, 0.0, uGISize.z - 1.0);
+	float z0 = floor(z);
+	float z1 = min(z0 + 1.0, uGISize.z - 1.0);
+	float t = z - z0;
+	if (dot(n, n) < 0.5)
+	{
+		vec3 sum = vec3(0.0);
+		for (int f = 0; f < 6; f++) sum += SampleIrradianceFace(f, uv, z0, z1, t);
+		return sum * (1.0 / 6.0);
+	}
+	vec3 n2 = n * n;
+	return n2.x * SampleIrradianceFace(n.x >= 0.0 ? 0 : 1, uv, z0, z1, t)
+		+ n2.y * SampleIrradianceFace(n.y >= 0.0 ? 2 : 3, uv, z0, z1, t)
+		+ n2.z * SampleIrradianceFace(n.z >= 0.0 ? 4 : 5, uv, z0, z1, t);
+}
+
+// Raises the effective light level toward the bounced light from brighter
+// surroundings and tints the surface with the color of nearby surfaces.
+// Doom's own light level stays the minimum.
+void ApplyIrradiance(inout float lightlevel, inout vec3 tint)
+{
+	vec3 gi = SampleIrradiance(HasSurfaceNormal() ? normalize(vWorldNormal.xyz) : vec3(0.0)) * uGIStrength;
+	float lum = dot(gi, vec3(0.2126, 0.7152, 0.0722));
+	// Only add the part of the bounce that exceeds the sector light, and only
+	// partially, so authored light contrast survives.
+	lightlevel += max(min(lum, 1.0) - lightlevel, 0.0) * 0.45;
+	vec3 chroma = gi / max(lum, 0.001);
+	tint = mix(vec3(1.0), chroma, uGISaturation * smoothstep(0.0, 0.1, lum));
+	tint /= max(dot(tint, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+}
+
+//===========================================================================
+//
 // Sets the common material properties.
 //
 //===========================================================================
@@ -663,8 +866,14 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 		texCoord.t = period + mod(texCoord.t, uNpotEmulation.y);
 	}
 #endif	
+	if (HasFeature(RF_PARALLAX)) texCoord = ParallaxTexCoord(texCoord);
 	material.Base = getTexel(texCoord.st); 
 	material.Normal = ApplyNormalMap(texCoord.st);
+#if !defined(NORMALMAP) && !defined(NO_LAYERS)
+	vec2 stdx = dFdx(texCoord.st), stdy = dFdy(texCoord.st);
+	if (HasFeature(RF_AUTO_NORMAL) && uLightIndex >= 0 && HasSurfaceNormal())
+		material.Normal = AutoNormal(normalize(vWorldNormal.xyz), texCoord.st, stdx, stdy);
+#endif
 
 // OpenGL doesn't care, but Vulkan pukes all over the place if these texture samplings are included in no-texture shaders, even though never called.
 #ifndef NO_LAYERS
@@ -700,13 +909,23 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 {
 	vec4 color = vColor;
 
+	vec3 giTint = vec3(1.0);
 	if (uLightLevel >= 0.0)
 	{
-		float newlightlevel = 1.0 - R_DoomLightingEquation(uLightLevel);
-		color.rgb *= newlightlevel;
+		float lightlevel = uLightLevel;
+		if (HasFeature(RF_IRRADIANCE)) ApplyIrradiance(lightlevel, giTint);
+		float newlightlevel = 1.0 - R_DoomLightingEquation(lightlevel);
+		color.rgb *= newlightlevel * giTint;
 	}
 	else if (uFogEnabled > 0)
 	{
+		if (HasFeature(RF_IRRADIANCE))
+		{
+			float unused = 0.0;
+			ApplyIrradiance(unused, giTint);
+			color.rgb *= giTint;
+		}
+
 		// brightening around the player for light mode 2
 		if (fogdist < uLightDist)
 		{
@@ -923,7 +1142,9 @@ void main()
 #endif
 
 #ifdef GBUFFER_PASS
-	FragFog = vec4(AmbientOcclusionColor(), 1.0);
+	// Alpha above 0.5 marks a scene surface; (1 - alpha) * 2 is its reflectivity.
+	// Cleared pixels (sky, void) keep alpha 0 and never reflect.
+	FragFog = vec4(AmbientOcclusionColor(), HasFeature(RF_REFLECTIONS) ? 1.0 - 0.5 * uMaterialParams.x : 1.0);
 	FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, 1.0);
 #endif
 }

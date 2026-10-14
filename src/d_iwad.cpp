@@ -455,6 +455,9 @@ int FIWadManager::CheckIWADInfo(const char* fn)
 
 void FIWadManager::CollectSearchPaths()
 {
+	// Development and original-game bundles keep their IWADs together.
+	if (DirExists((progdir + "Games").GetChars()))
+		mSearchPaths.Push(progdir + "Games");
 	if (GameConfig->SetSection("IWADSearch.Directories"))
 	{
 		const char *key;

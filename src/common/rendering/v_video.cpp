@@ -131,6 +131,9 @@ CUSTOM_CVAR(Int, vid_preferbackend, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_N
 
 int V_GetBackend()
 {
+#ifdef GZDOOM_IOS
+	return 1; // UIKit devices always use the Metal-backed Vulkan renderer.
+#endif
 	int v = vid_preferbackend;
 	if (v == 3) vid_preferbackend = v = 2;
 	else if (v < 0 || v > 3) v = 0;

@@ -333,6 +333,16 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 
 			float uThickFogDistance;
 			float uThickFogMultiplier;
+
+			int uRenderFeatures;
+			float uGIStrength;
+			float uGISaturation;
+			float uSpecularStrength;
+			float uNormalStrength;
+			float uViewPadding0;
+			float uViewPadding1;
+			vec4 uGIOrigin;
+			vec4 uGISize;
 		};
 
 		uniform int uTextureMode;
@@ -364,6 +374,7 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 		uniform vec4 uSplitBottomPlane;
 
 		uniform vec4 uDetailParms;
+		uniform vec4 uMaterialParams;
 		// Lighting + Fog
 		uniform vec4 uLightAttr;
 		#define uLightLevel uLightAttr.a
@@ -416,6 +427,7 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 		uniform sampler2D tex;
 		uniform sampler2D ShadowMap;
 		uniform sampler2DArray LightMap;
+		uniform sampler2DArray IrradianceVolume;
 		uniform sampler2D texture2;
 		uniform sampler2D texture3;
 		uniform sampler2D texture4;
@@ -752,6 +764,7 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 	muSplitBottomPlane.Init(hShader, "uSplitBottomPlane");
 	muSplitTopPlane.Init(hShader, "uSplitTopPlane");
 	muDetailParms.Init(hShader, "uDetailParms");
+	muMaterialParams.Init(hShader, "uMaterialParams");
 #ifdef NPOT_EMULATION
 	muNpotEmulation.Init(hShader, "uNpotEmulation");
 #endif

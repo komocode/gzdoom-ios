@@ -259,6 +259,7 @@ class FShader
 	FUniform4f muSplitBottomPlane;
 	FUniform4f muSplitTopPlane;
 	FUniform4f muDetailParms;
+	FUniform4f muMaterialParams;
 	FBufferedUniform1f muInterpolationFactor;
 	FBufferedUniform1f muAlphaThreshold;
 	FBufferedUniform2f muSpecularMaterial;

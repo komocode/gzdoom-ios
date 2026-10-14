@@ -24,6 +24,7 @@ public:
 	void BeginFrame();
 
 	void SetLightmap(int LMTextureSize, int LMTextureCount, const TArray<uint16_t>& LMTextureData);
+	void SetIrradianceVolume(int width, int height, int layers, const TArray<uint16_t>& rgbaHalfData);
 
 	VkTextureImage* GetTexture(const PPTextureType& type, PPTexture* tex);
 	VkFormat GetTextureFormat(PPTexture* texture);
@@ -39,11 +40,13 @@ public:
 
 	VkTextureImage Shadowmap;
 	VkTextureImage Lightmap;
+	VkTextureImage Irradiance;
 
 private:
 	void CreateNullTexture();
 	void CreateShadowmap();
 	void CreateLightmap();
+	void UploadHalfArray(VkTextureImage& image, int w, int h, int count, const uint16_t* src, int srcChannels, const char* name);
 
 	VkPPTexture* GetVkTexture(PPTexture* texture);
 

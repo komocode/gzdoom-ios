@@ -26,7 +26,7 @@
 //GL headers
 #include "gl_load/gl_load.h"
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GZDOOM_IOS) && !defined(GZDOOM_WATCH)
 	#include <OpenGL/OpenGL.h>
 #endif
 

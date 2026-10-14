@@ -25,6 +25,9 @@
 **
 */
 
+#include "hw_irradiance.h"
+#include "hw_modernrender.h"
+#include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "a_sharedglobal.h"
 #include "r_utility.h"
 #include "r_sky.h"
@@ -177,6 +180,11 @@ void HWDrawInfo::StartScene(FRenderViewpoint &parentvp, HWViewpointUniforms *uni
 		VPUniforms.mLightBlendMode = (level.info ? (int)level.info->lightblendmode : 0);
 		VPUniforms.mThickFogDistance = Level->thickfogdistance;
 		VPUniforms.mThickFogMultiplier = Level->thickfogmultiplier;
+		VPUniforms.mRenderFeatures = R_ModernFeatureMask(PPAmbientOcclusion::GBufferNeeded()); // pass type is not set yet here
+		VPUniforms.mSpecularStrength = r_specular_strength;
+		VPUniforms.mNormalStrength = r_autonormal_strength;
+		GI_SetUniforms(VPUniforms);
+		if (VPUniforms.mGISize.W == 0) VPUniforms.mRenderFeatures &= ~RF_IRRADIANCE;
 	}
 	mClipper->SetViewpoint(Viewpoint);
 	vClipper->SetViewpoint(Viewpoint);

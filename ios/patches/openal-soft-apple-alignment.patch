@@ -1,0 +1,15 @@
+--- a/common/almalloc.h
++++ b/common/almalloc.h
+@@ -51,7 +51,13 @@
+ template<typename T, std::size_t AlignV=alignof(T)>
+ struct allocator {
++#ifdef __APPLE__
++    // Darwin's aligned allocation needs at least pointer alignment, including
++    // the four-byte effect/filter types. Keep allocation and deletion paired.
++    static constexpr auto Alignment = std::max({AlignV, alignof(T), alignof(void*)});
++#else
+     static constexpr auto Alignment = std::max(AlignV, alignof(T));
++#endif
+     static constexpr auto AlignVal = std::align_val_t{Alignment};
+ 
+     using value_type = std::remove_cvref_t<T>;

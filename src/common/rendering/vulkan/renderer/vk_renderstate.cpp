@@ -584,6 +584,19 @@ void VkRenderStateMolten::Draw(int dt, int index, int count, bool apply)
 {
 	if (dt == DT_TriangleFan)
 	{
+		int baseVertex = index;
+#ifdef GZDOOM_IOS
+		extern bool IOS_SupportsBaseVertex();
+		int savedOffsets[2] = {mVertexOffsets[0], mVertexOffsets[1]};
+		if (!IOS_SupportsBaseVertex())
+		{
+			// Older Metal implementations and Simulator do not support base
+			// vertex draws. Move the bindings instead, keeping indices at zero.
+			mVertexOffsets[0] += index;
+			mVertexOffsets[1] += index;
+			baseVertex = 0;
+		}
+#endif
 		IIndexBuffer *oldIndexBuffer = mIndexBuffer;
 		mIndexBuffer = fb->GetBufferManager()->FanToTrisIndexBuffer.get();
 
@@ -592,7 +605,12 @@ void VkRenderStateMolten::Draw(int dt, int index, int count, bool apply)
 		else
 			ApplyVertexBuffers();
 
-		mCommandBuffer->drawIndexed((count - 2) * 3, 1, 0, index, 0);
+		mCommandBuffer->drawIndexed((count - 2) * 3, 1, 0, baseVertex, 0);
+
+#ifdef GZDOOM_IOS
+		mVertexOffsets[0] = savedOffsets[0];
+		mVertexOffsets[1] = savedOffsets[1];
+#endif
 
 		mIndexBuffer = oldIndexBuffer;
 	}

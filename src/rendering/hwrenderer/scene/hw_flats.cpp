@@ -25,6 +25,7 @@
 **
 */
 
+#include "hw_modernrender.h"
 #include "a_sharedglobal.h"
 #include "a_dynlight.h"
 #include "r_defs.h"
@@ -34,6 +35,7 @@
 #include "d_player.h"
 #include "g_levellocals.h"
 #include "actorinlines.h"
+#include "p_terrain.h"
 #include "p_lnspec.h"
 #include "matrix.h"
 #include "hw_dynlightdata.h"
@@ -329,6 +331,7 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 	state.SetAddColor(AddColor | 0xff000000);
 	state.ApplyTextureManipulation(TextureFx);
 	if (plane.plane.dithertransflag) state.SetEffect(EFF_DITHERTRANS);
+	SetReflectivity(state);
 
 	if (hacktype & SSRF_PLANEHACK)
 	{
@@ -384,7 +387,59 @@ void HWFlat::DrawFlat(HWDrawInfo *di, FRenderState &state, bool translucent)
 	state.SetObjectColor(0xffffffff);
 	state.SetAddColor(0);
 	state.ApplyTextureManipulation(nullptr);
+	state.SetMaterialParams(0, 0);
 	if (plane.plane.dithertransflag) state.SetEffect(EFF_NONE);
+}
+
+//==========================================================================
+//
+// Reflectivity for screen-space reflections: liquids are strongly
+// reflective; with r_ssr 2 other floors get a subtle glossy reflection.
+//
+//==========================================================================
+
+// Doom's TERRAIN definitions do not mark any flat as liquid, so recognize the
+// stock animated liquids by name. Results are cached per texture.
+static bool IsLiquidFlat(FTextureID tex)
+{
+	static TMap<int, bool> cache;
+	if (!tex.isValid()) return false;
+	if (bool *found = cache.CheckKey(tex.GetIndex())) return *found;
+
+	static const char *const prefixes[] = { "NUKAGE", "FWATER", "SWATER", "LAVA", "BLOOD", "SLIME0" };
+	bool liquid = false;
+	auto gtex = TexMan.GetGameTexture(tex);
+	if (gtex != nullptr)
+	{
+		const char *name = gtex->GetName().GetChars();
+		for (auto prefix : prefixes)
+			if (!strnicmp(name, prefix, strlen(prefix))) liquid = true;
+		// SLIME09-SLIME12 are rock, not liquid.
+		if (!strnicmp(name, "SLIME", 5) && atoi(name + 5) > 8) liquid = false;
+	}
+	cache[tex.GetIndex()] = liquid;
+	return liquid;
+}
+
+void HWFlat::SetReflectivity(FRenderState &state)
+{
+	float reflectivity = 0, gloss = 0;
+	if (r_ssr > 0 || r_specular)
+	{
+		int terrain = sector->GetTerrain(ceiling ? sector_t::ceiling : sector_t::floor);
+		bool liquid = (terrain >= 0 && terrain < (int)Terrains.Size() && Terrains[terrain].IsLiquid) || IsLiquidFlat(sector->GetTexture(sector_t::floor));
+		if (liquid && !ceiling)
+		{
+			reflectivity = 0.55f;
+			gloss = 1.f;
+		}
+		else if (r_ssr > 1 && !ceiling)
+		{
+			reflectivity = 0.14f;
+			gloss = 0.3f;
+		}
+	}
+	state.SetMaterialParams(reflectivity, gloss, reflectivity == 0 && alpha >= 1.f);
 }
 
 //==========================================================================

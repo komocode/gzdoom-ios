@@ -33,6 +33,17 @@ struct HWViewpointUniforms
 	float mThickFogDistance = -1.f;
 	float mThickFogMultiplier = 30.f;
 
+	// Modern lighting (see hw_modernrender.h). Layout must match std140 in the shaders.
+	int mRenderFeatures = 0;
+	float mGIStrength = 0.f;
+	float mGISaturation = 0.f;
+	float mSpecularStrength = 0.f;
+	float mNormalStrength = 0.f;
+	float mViewPadding0 = 0.f;
+	float mViewPadding1 = 0.f;
+	FVector4 mGIOrigin = { 0, 0, 0, 1 };	// irradiance volume origin (x, height, y) and probe spacing
+	FVector4 mGISize = { 0, 0, 0, 0 };		// probe counts (x, height, y), w = 1 when a volume is bound
+
 	void CalcDependencies()
 	{
 		mNormalViewMatrix.computeNormalMatrix(mViewMatrix);

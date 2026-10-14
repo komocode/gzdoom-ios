@@ -26,6 +26,7 @@
 #include "hwrenderer/postprocessing/hw_postprocessshader.h"
 #include <random>
 #include "texturemanager.h"
+#include "hw_modernrender.h"
 
 #include "stats.h"
 
@@ -80,9 +81,15 @@ void PPBloom::RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneH
 		return;
 	}
 
-	renderstate->PushGroup("bloom");
-
 	UpdateTextures(sceneWidth, sceneHeight);
+
+	if (r_bloom_modern)
+	{
+		RenderModernBloom(renderstate, sceneWidth, sceneHeight);
+		return;
+	}
+
+	renderstate->PushGroup("bloom");
 
 	ExtractUniforms extractUniforms;
 	extractUniforms.Scale = screen->SceneScale();
@@ -106,7 +113,7 @@ void PPBloom::RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneH
 	ComputeBlurSamples(7, blurAmount, blurUniforms.SampleWeights);
 
 	// Blur and downscale:
-	for (int i = 0; i < NumBloomLevels - 1; i++)
+	for (int i = 0; i < NumClassicBloomLevels - 1; i++)
 	{
 		auto &blevel = levels[i];
 		auto &next = levels[i + 1];
@@ -126,7 +133,7 @@ void PPBloom::RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneH
 	}
 
 	// Blur and upscale:
-	for (int i = NumBloomLevels - 1; i > 0; i--)
+	for (int i = NumClassicBloomLevels - 1; i > 0; i--)
 	{
 		auto &blevel = levels[i];
 		auto &next = levels[i - 1];
@@ -617,6 +624,7 @@ void PPTonemap::Render(PPRenderState *renderstate)
 	case ETonemapMode::HejlDawson:	shader = &HejlDawsonShader; break;
 	case ETonemapMode::Uncharted2:	shader = &Uncharted2Shader; break;
 	case ETonemapMode::Palette:		shader = &PaletteShader; break;
+	case ETonemapMode::ACES:		shader = &ACESShader; break;
 	}
 
 	renderstate->PushGroup("tonemap");
@@ -717,9 +725,14 @@ void PPAmbientOcclusion::UpdateTextures(int width, int height)
 	LastHeight = height;
 }
 
+bool PPAmbientOcclusion::GBufferNeeded()
+{
+	return gl_ssao != 0 || hw_postprocess.sceneEffects.Active();
+}
+
 void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight)
 {
-	if (gl_ssao == 0 || sceneWidth == 0 || sceneHeight == 0)
+	if (!GBufferNeeded() || sceneWidth == 0 || sceneHeight == 0)
 	{
 		return;
 	}
@@ -796,6 +809,15 @@ void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneW
 	renderstate->SetOutputTexture(&LinearDepthTexture);
 	renderstate->SetNoBlend();
 	renderstate->Draw();
+
+	// Reflections and light scattering read the opaque scene before AO darkens it.
+	hw_postprocess.sceneEffects.Render(renderstate, m5, sceneWidth, sceneHeight, &LinearDepthTexture, AmbientWidth, AmbientHeight);
+
+	if (gl_ssao == 0)
+	{
+		renderstate->PopGroup();
+		return;
+	}
 
 	// Apply ambient occlusion
 	renderstate->Clear();
@@ -1128,6 +1150,7 @@ void PPCustomShaderInstance::AddUniformField(size_t &offset, const FString &name
 
 void Postprocess::Pass1(PPRenderState* state, int fixedcm, int sceneWidth, int sceneHeight)
 {
+	taa.Render(state, sceneWidth, sceneHeight);
 	exposure.Render(state, sceneWidth, sceneHeight);
 	customShaders.Run(state, "beforebloom");
 	bloom.RenderBloom(state, sceneWidth, sceneHeight, fixedcm);
@@ -1139,5 +1162,417 @@ void Postprocess::Pass2(PPRenderState* state, int fixedcm, float flash, int scen
 	colormap.Render(state, fixedcm, flash);
 	lens.Render(state);
 	fxaa.Render(state);
+	finish.Render(state);
 	customShaders.Run(state, "scene");
+}
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Progressive bloom: a 13-tap downsample chain with a soft-knee threshold on
+// the first level, then a tent-filtered upsample that accumulates each level
+// into the next larger one. Fewer passes and less bandwidth than the separable
+// Gaussian chain, and without its flicker on small bright pixels.
+//
+/////////////////////////////////////////////////////////////////////////////
+
+void PPBloom::RenderModernBloom(PPRenderState *renderstate, int sceneWidth, int sceneHeight)
+{
+	renderstate->PushGroup("bloom");
+
+	BloomDownUniforms down;
+	down.Scale = screen->SceneScale();
+	down.Offset = screen->SceneOffset();
+	down.InvSize = { 1.0f / sceneWidth, 1.0f / sceneHeight };
+	down.Threshold = 1.0f;
+	down.Knee = 0.5f;
+
+	renderstate->Clear();
+	renderstate->Shader = &BloomPrefilter;
+	renderstate->Uniforms.Set(down);
+	renderstate->Viewport = levels[0].Viewport;
+	renderstate->SetInputCurrent(0, PPFilterMode::Linear);
+	renderstate->SetInputTexture(1, &hw_postprocess.exposure.CameraTexture);
+	renderstate->SetOutputTexture(&levels[0].VTexture);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	for (int i = 1; i < NumBloomLevels; i++)
+	{
+		auto &prev = levels[i - 1];
+		down.Scale = { 1.0f, 1.0f };
+		down.Offset = { 0.0f, 0.0f };
+		down.InvSize = { 1.0f / prev.Viewport.width, 1.0f / prev.Viewport.height };
+		renderstate->Clear();
+		renderstate->Shader = &BloomDown;
+		renderstate->Uniforms.Set(down);
+		renderstate->Viewport = levels[i].Viewport;
+		renderstate->SetInputTexture(0, &prev.VTexture, PPFilterMode::Linear);
+		renderstate->SetOutputTexture(&levels[i].VTexture);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	BloomUpUniforms up;
+	up.Padding = 0.0f;
+	for (int i = NumBloomLevels - 1; i > 0; i--)
+	{
+		auto &src = levels[i];
+		up.InvSize = { 1.0f / src.Viewport.width, 1.0f / src.Viewport.height };
+		up.Intensity = 1.0f;
+		renderstate->Clear();
+		renderstate->Shader = &BloomUp;
+		renderstate->Uniforms.Set(up);
+		renderstate->Viewport = levels[i - 1].Viewport;
+		renderstate->SetInputTexture(0, &src.VTexture, PPFilterMode::Linear);
+		renderstate->SetOutputTexture(&levels[i - 1].VTexture);
+		renderstate->SetAdditiveBlend();
+		renderstate->Draw();
+	}
+
+	up.InvSize = { 1.0f / levels[0].Viewport.width, 1.0f / levels[0].Viewport.height };
+	up.Intensity = 0.12f * gl_bloom_amount;
+	renderstate->Clear();
+	renderstate->Shader = &BloomUp;
+	renderstate->Uniforms.Set(up);
+	renderstate->Viewport = screen->mSceneViewport;
+	renderstate->SetInputTexture(0, &levels[0].VTexture, PPFilterMode::Linear);
+	renderstate->SetOutputCurrent();
+	renderstate->SetAdditiveBlend();
+	renderstate->Draw();
+
+	renderstate->PopGroup();
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+bool PPSceneEffects::Active() const
+{
+	return r_ssr > 0 || r_ssgi > 0 || (r_volumetric > 0 && Volumetric.LightCount > 0);
+}
+
+void PPSceneEffects::SetVolumetricLights(const FVector4 *lights, int count)
+{
+	count = clamp(count, 0, (int)MaxVolumetricLights);
+	Volumetric.LightCount = count;
+	for (int i = 0; i < count * 2; i++)
+		Volumetric.Lights[i] = lights[i];
+}
+
+void PPSceneEffects::UpdateTextures(int width, int height)
+{
+	if (width == Width && height == Height)
+		return;
+	Width = width;
+	Height = height;
+	Reflections = { width, height, PixelFormat::Rgba16f };
+	Volumetrics = { width, height, PixelFormat::Rgba16f };
+	Indirect = { width, height, PixelFormat::Rgba16f };
+}
+
+void PPSceneEffects::Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight, PPTexture *linearDepth, int depthWidth, int depthHeight)
+{
+	bool reflections = r_ssr > 0;
+	bool volumetrics = r_volumetric > 0 && Volumetric.LightCount > 0;
+	bool indirect = r_ssgi > 0;
+	if (!reflections && !volumetrics && !indirect)
+		return;
+
+	// Effects render at the SSAO resolution (half size) and are upscaled when composited.
+	UpdateTextures(depthWidth, depthHeight);
+
+	float tanHalfFovy = 1.0f / m5;
+	float invFocalLenX = tanHalfFovy * (sceneWidth / (float)sceneHeight);
+	float invFocalLenY = tanHalfFovy;
+	FVector2 uvToViewA = { 2.0f * invFocalLenX, 2.0f * invFocalLenY };
+	FVector2 uvToViewB = { -invFocalLenX, -invFocalLenY };
+
+	IntRect viewport;
+	viewport.left = 0;
+	viewport.top = 0;
+	viewport.width = depthWidth;
+	viewport.height = depthHeight;
+
+	CompositeUniforms composite;
+	composite.Scale = { 1.0f, 1.0f };
+	composite.Offset = { 0.0f, 0.0f };
+
+	renderstate->PushGroup("sceneeffects");
+
+	if (reflections)
+	{
+		ReflectionUniforms u;
+		u.UVToViewA = uvToViewA;
+		u.UVToViewB = uvToViewB;
+		u.Scale = screen->SceneScale();
+		u.Offset = screen->SceneOffset();
+		u.InvSize = { 1.0f / depthWidth, 1.0f / depthHeight };
+		u.Strength = r_ssr_strength;
+		u.MaxDistance = 1024.0f;
+		u.Thickness = 24.0f;
+		u.Steps = r_ssr > 1 ? 40 : 24;
+		u.SampleIndex = 0;
+		u.Padding = 0.0f;
+
+		renderstate->Clear();
+		renderstate->Shader = gl_multisample > 1 ? &ReflectMS : &Reflect;
+		renderstate->Uniforms.Set(u);
+		renderstate->Viewport = viewport;
+		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
+		renderstate->SetInputSceneNormal(1);
+		renderstate->SetInputSceneFog(2);
+		renderstate->SetInputSceneColor(3);
+		renderstate->SetOutputTexture(&Reflections);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	if (indirect)
+	{
+		ReflectionUniforms u;
+		u.UVToViewA = uvToViewA;
+		u.UVToViewB = uvToViewB;
+		u.Scale = screen->SceneScale();
+		u.Offset = screen->SceneOffset();
+		u.InvSize = { 1.0f / depthWidth, 1.0f / depthHeight };
+		u.Strength = r_ssgi_strength;
+		u.MaxDistance = 192.0f;
+		u.Thickness = 32.0f;
+		u.Steps = 8;
+		u.SampleIndex = 0;
+		u.Padding = 0.0f;
+
+		renderstate->Clear();
+		renderstate->Shader = gl_multisample > 1 ? &GatherMS : &Gather;
+		renderstate->Uniforms.Set(u);
+		renderstate->Viewport = viewport;
+		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
+		renderstate->SetInputSceneNormal(1);
+		renderstate->SetInputSceneFog(2);
+		renderstate->SetInputSceneColor(3);
+		renderstate->SetOutputTexture(&Indirect);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	if (volumetrics)
+	{
+		Volumetric.UVToViewA = uvToViewA;
+		Volumetric.UVToViewB = uvToViewB;
+		Volumetric.Strength = r_volumetric_strength;
+		renderstate->Clear();
+		renderstate->Shader = &Scatter;
+		renderstate->Uniforms.Set(Volumetric);
+		renderstate->Viewport = viewport;
+		renderstate->SetInputTexture(0, linearDepth, PPFilterMode::Nearest);
+		renderstate->SetOutputTexture(&Volumetrics);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	if (reflections)
+	{
+		renderstate->Clear();
+		renderstate->Shader = &Composite;
+		renderstate->Uniforms.Set(composite);
+		renderstate->Viewport = screen->mSceneViewport;
+		renderstate->SetInputTexture(0, &Reflections, PPFilterMode::Linear);
+		renderstate->SetOutputSceneColor();
+		renderstate->SetAlphaBlend();
+		renderstate->Draw();
+	}
+
+	if (indirect)
+	{
+		renderstate->Clear();
+		renderstate->Shader = &Composite;
+		renderstate->Uniforms.Set(composite);
+		renderstate->Viewport = screen->mSceneViewport;
+		renderstate->SetInputTexture(0, &Indirect, PPFilterMode::Linear);
+		renderstate->SetOutputSceneColor();
+		renderstate->SetAdditiveBlend();
+		renderstate->Draw();
+	}
+
+	if (volumetrics)
+	{
+		renderstate->Clear();
+		renderstate->Shader = &Composite;
+		renderstate->Uniforms.Set(composite);
+		renderstate->Viewport = screen->mSceneViewport;
+		renderstate->SetInputTexture(0, &Volumetrics, PPFilterMode::Linear);
+		renderstate->SetOutputSceneColor();
+		renderstate->SetAdditiveBlend();
+		renderstate->Draw();
+	}
+
+	renderstate->PopGroup();
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+void PPFinish::Render(PPRenderState *renderstate)
+{
+	if (r_sharpen <= 0.0f && r_vignette <= 0.0f && r_grain <= 0.0f)
+		return;
+
+	FinishUniforms u;
+	u.InvSize = { 1.0f / screen->mScreenViewport.width, 1.0f / screen->mScreenViewport.height };
+	u.Sharpen = clamp((float)r_sharpen, 0.0f, 1.0f);
+	u.Vignette = clamp((float)r_vignette, 0.0f, 1.0f);
+	u.Grain = clamp((float)r_grain, 0.0f, 1.0f);
+	u.Time = (float)((screen->FrameTime % 100000) * 0.001);
+	u.Aspect = screen->mScreenViewport.width / (float)max(screen->mScreenViewport.height, 1);
+	u.Padding = 0.0f;
+
+	renderstate->PushGroup("finish");
+	renderstate->Clear();
+	renderstate->Shader = &Finish;
+	renderstate->Uniforms.Set(u);
+	renderstate->Viewport = screen->mScreenViewport;
+	renderstate->SetInputCurrent(0, PPFilterMode::Nearest);
+	renderstate->SetOutputNext();
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+	renderstate->PopGroup();
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+static float Halton(unsigned index, unsigned base)
+{
+	float f = 1.0f, r = 0.0f;
+	while (index > 0)
+	{
+		f /= base;
+		r += f * (index % base);
+		index /= base;
+	}
+	return r;
+}
+
+bool PPTemporalAA::Enabled() const
+{
+	// MSAA already resolves edges and its depth can't be sampled here.
+	return r_taa && gl_multisample <= 1;
+}
+
+FVector2 PPTemporalAA::BeginFrame(int sceneWidth, int sceneHeight)
+{
+	CameraValid = false;
+	if (!Enabled() || sceneWidth <= 0 || sceneHeight <= 0)
+	{
+		HistoryValid = false;
+		PrevValid = false;
+		JitterNDC = { 0.0f, 0.0f };
+		return JitterNDC;
+	}
+	// A pause in 3D rendering (menus, wipes, console) invalidates the history.
+	if (screen->FrameTime - LastFrame > 250)
+		HistoryValid = false;
+	FrameIndex = FrameIndex % 8 + 1;
+	JitterNDC.X = (Halton(FrameIndex, 2) - 0.5f) * 2.0f / sceneWidth;
+	JitterNDC.Y = (Halton(FrameIndex, 3) - 0.5f) * 2.0f / sceneHeight;
+	return JitterNDC;
+}
+
+void PPTemporalAA::SetCamera(const VSMatrix &projection, const VSMatrix &view, const DVector3 &pos)
+{
+	if (!Enabled())
+		return;
+	CurProj = projection;
+	CurView = view;
+	CurPos = pos;
+	CameraValid = true;
+}
+
+void PPTemporalAA::UpdateTextures(int width, int height)
+{
+	if (width == Width && height == Height)
+		return;
+	Width = width;
+	Height = height;
+	History = { width, height, PixelFormat::Rgba16f };
+	HistoryValid = false;
+}
+
+void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight)
+{
+	if (!Enabled() || !CameraValid)
+	{
+		HistoryValid = false;
+		PrevValid = false;
+		return;
+	}
+	CameraValid = false;
+	LastFrame = screen->FrameTime;
+
+	UpdateTextures(screen->mScreenViewport.width, screen->mScreenViewport.height);
+
+	// Teleports and level changes start over instead of smearing.
+	if (PrevValid && (CurPos - PrevPos).LengthSquared() > 128.0 * 128.0)
+		HistoryValid = false;
+	if (!PrevValid)
+	{
+		PrevProj = CurProj;
+		PrevView = CurView;
+	}
+
+	// current view space -> world -> previous clip space
+	VSMatrix invView;
+	VSMatrix view = CurView;
+	view.inverseMatrix(invView);
+	VSMatrix reprojection = PrevProj;
+	reprojection.multMatrix(PrevView);
+	reprojection.multMatrix(invView);
+
+	TemporalUniforms u;
+	const FLOATTYPE *m = reprojection.get();
+	for (int i = 0; i < 16; i++)
+		u.Reprojection[i] = (float)m[i];
+	float m5 = CurProj.get()[5];
+	float tanHalfFovy = 1.0f / m5;
+	float invFocalLenX = tanHalfFovy * (sceneWidth / (float)sceneHeight);
+	u.UVToViewA = { 2.0f * invFocalLenX, 2.0f * tanHalfFovy };
+	u.UVToViewB = { -invFocalLenX, -tanHalfFovy };
+	u.Scale = screen->SceneScale();
+	u.Offset = screen->SceneOffset();
+	u.InvSize = { 1.0f / screen->mScreenViewport.width, 1.0f / screen->mScreenViewport.height };
+	u.Jitter = { JitterNDC.X * 0.5f, JitterNDC.Y * 0.5f };
+	u.LinearizeDepthA = 1.0f / screen->GetZFar() - 1.0f / screen->GetZNear();
+	u.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
+	u.Feedback = HistoryValid ? 0.9f : 0.0f;
+	u.Padding = 0.0f;
+
+	renderstate->PushGroup("taa");
+
+	renderstate->Clear();
+	renderstate->Shader = &Resolve;
+	renderstate->Uniforms.Set(u);
+	renderstate->Viewport = screen->mScreenViewport;
+	renderstate->SetInputCurrent(0, PPFilterMode::Nearest);
+	renderstate->SetInputTexture(1, &History, PPFilterMode::Linear);
+	renderstate->SetInputSceneDepth(2);
+	renderstate->SetOutputNext();
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	CompositeUniforms copy;
+	copy.Scale = { 1.0f, 1.0f };
+	copy.Offset = { 0.0f, 0.0f };
+	renderstate->Clear();
+	renderstate->Shader = &Copy;
+	renderstate->Uniforms.Set(copy);
+	renderstate->Viewport = { 0, 0, Width, Height };
+	renderstate->SetInputCurrent(0, PPFilterMode::Nearest);
+	renderstate->SetOutputTexture(&History);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	renderstate->PopGroup();
+
+	HistoryValid = true;
+	PrevValid = true;
+	PrevProj = CurProj;
+	PrevView = CurView;
+	PrevPos = CurPos;
 }

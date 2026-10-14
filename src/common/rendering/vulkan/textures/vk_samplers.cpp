@@ -96,7 +96,7 @@ void VkSamplerManager::CreateHWSamplers()
 		builder.MipmapMode(TexFilter[filter].mipfilter);
 		if (TexFilter[filter].mipmapping)
 		{
-			builder.Anisotropy(gl_texture_filter_anisotropic);
+			builder.Anisotropy(std::min(float(gl_texture_filter_anisotropic), fb->device->PhysicalDevice.Properties.Properties.limits.maxSamplerAnisotropy));
 			builder.MaxLod(100.0f); // According to the spec this value is clamped so something high makes it usable for all textures.
 		}
 		else

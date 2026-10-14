@@ -1101,6 +1101,7 @@ OptionMenu "AdvDisplayOptions" protected
 	Submenu "$OPTMNU_LIGHT", 					"LightOptions"
 	Submenu "$GLMNU_TEXOPT", 					"GLTextureGLOptions"
 	Submenu "$GLMNU_POSTPROCESS",				"PostProcessMenu"
+	Submenu "Modern Rendering",				"ModernRenderMenu"
 	Submenu "$GLPREFMNU_VRMODE",				"VR3DMenu"
 	IfOption(SWRender)
 	{
@@ -2731,6 +2732,7 @@ OptionValue "TonemapModes"
 	2, "$OPTVAL_HEJLDAWSON"
 	3, "$OPTVAL_REINHARD"
 	5, "$OPTVAL_PALETTE"
+	6, "ACES Filmic"
 }
 
 OptionValue "SSAOModes"
@@ -2975,6 +2977,74 @@ OptionMenu "PostProcessMenu" protected
 	StaticText " "
 	Slider "$GLPREFMNU_PALTONEMAPPOWER",		gl_paltonemap_powtable,			0.2, 3.0, 0.1, 1
 	Option "$GLPREFMNU_PALTONEMAPORDER",		gl_paltonemap_reverselookup,	"LookupOrder"
+}
+
+OptionValue "RenderPresets"
+{
+	-1, "Custom"
+	0, "Classic"
+	1, "Low"
+	2, "Medium"
+	3, "High"
+	4, "Ultra"
+}
+
+OptionValue "SSRModes"
+{
+	0, "$OPTVAL_OFF"
+	1, "Liquids"
+	2, "Liquids and glossy floors"
+}
+
+OptionValue "VolumetricModes"
+{
+	0, "$OPTVAL_OFF"
+	1, "Half resolution"
+	2, "Full resolution"
+}
+
+OptionValue "GIQuality"
+{
+	0, "Fast"
+	1, "Normal"
+	2, "High"
+}
+
+OptionMenu "ModernRenderMenu" protected
+{
+	Title "Modern Rendering"
+	Option "Quality preset",				r_preset,				"RenderPresets"
+	Option "Choose preset for this device",	r_preset_auto,			"OnOff"
+	StaticText " "
+	StaticText "Lighting", 1
+	Option "Baked global illumination",		r_gi,					"OnOff"
+	Option "GI bake quality",				r_gi_quality,			"GIQuality"
+	Slider "GI strength",					r_gi_strength,			0.0, 2.0, 0.1, 1
+	Slider "GI color bleeding",				r_gi_saturation,		0.0, 1.0, 0.05, 2
+	Option "Screen-space indirect light",	r_ssgi,					"OnOff"
+	Slider "Indirect light strength",		r_ssgi_strength,		0.0, 3.0, 0.1, 1
+	Option "Volumetric light",				r_volumetric,			"VolumetricModes"
+	Slider "Volumetric strength",			r_volumetric_strength,	0.0, 3.0, 0.1, 1
+	Option "Dynamic light shadows",			gl_light_shadowmap,		"OnOff"
+	StaticText " "
+	StaticText "Surfaces", 1
+	Option "Texture relief",				r_autonormal,			"OnOff"
+	Slider "Relief strength",				r_autonormal_strength,	0.0, 3.0, 0.1, 1
+	Option "Specular highlights",			r_specular,				"OnOff"
+	Slider "Specular strength",				r_specular_strength,	0.0, 3.0, 0.1, 1
+	Option "Parallax occlusion",			r_parallax,				"OnOff"
+	Option "Screen-space reflections",		r_ssr,					"SSRModes"
+	Slider "Reflection strength",			r_ssr_strength,			0.0, 2.0, 0.1, 1
+	StaticText " "
+	StaticText "Camera", 1
+	Option "$GLPREFMNU_TONEMAP",			gl_tonemap,				"TonemapModes"
+	Option "Progressive bloom",				r_bloom_modern,			"OnOff"
+	Option "Temporal anti-aliasing",		r_taa,					"OnOff"
+	Slider "Sharpen",						r_sharpen,				0.0, 1.0, 0.05, 2
+	Slider "Vignette",						r_vignette,				0.0, 1.0, 0.05, 2
+	Slider "Film grain",					r_grain,				0.0, 1.0, 0.05, 2
+	StaticText " "
+	Command "Rebake GI for this level",		"r_gi_rebake"
 }
 
 OptionMenu "ReverbEdit" protected

@@ -19,7 +19,9 @@ endif()
 
 # SDL2 finding stuff
 # Optional on all platforms
-find_package(SDL2 QUIET)
+if(NOT TARGET SDL2::SDL2)
+	find_package(SDL2 QUIET)
+endif()
 if(NOT ${SDL2_FOUND})
 	include(FindPkgConfig)
 	pkg_search_module(SDL2 sdl2)

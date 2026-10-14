@@ -62,6 +62,17 @@ vec3 Tonemap(vec3 color)
 	return sRGB(curr * whiteScale);
 }
 
+#elif defined(ACES)
+
+// ACES filmic curve (Narkowicz fit) with a slight exposure reduction so Doom's
+// midtones stay close to the original while highlights roll off smoothly.
+vec3 Tonemap(vec3 color)
+{
+	vec3 x = color * 0.9;
+	vec3 mapped = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+	return sRGB(clamp(mapped, 0.0, 1.0));
+}
+
 #elif defined(PALETTE)
 
 layout(binding=1) uniform sampler2D PaletteLUT;

@@ -235,6 +235,7 @@ public:
 	virtual void BlurScene(float amount) {}
 
 	virtual void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t>& LMTextureData) {}
+	virtual void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData) {}
 
     // Interface to hardware rendering resources
 	virtual IVertexBuffer *CreateVertexBuffer() { return nullptr; }

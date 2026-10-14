@@ -25,6 +25,11 @@
 **
 */
 
+#include "hw_modernrender.h"
+#include "hwrenderer/postprocessing/hw_postprocess.h"
+#include "a_dynlight.h"
+#include <algorithm>
+#include "hw_irradiance.h"
 #include "gi.h"
 #include "a_dynlight.h"
 #include "m_png.h"
@@ -100,6 +105,64 @@ void CollectLights(FLevelLocals* Level)
 
 //-----------------------------------------------------------------------------
 //
+// Picks the dynamic lights that contribute the most visible light scattering
+// and hands them to the volumetric pass in view space.
+//
+//-----------------------------------------------------------------------------
+
+static void CollectVolumetricLights(HWDrawInfo *di)
+{
+	if (r_volumetric <= 0 || !di->Level->HasDynamicLights)
+	{
+		hw_postprocess.sceneEffects.SetVolumetricLights(nullptr, 0);
+		return;
+	}
+
+	struct Candidate { float score; FVector4 pos; FVector4 color; };
+	TArray<Candidate> candidates;
+	auto &vp = di->Viewpoint;
+	DVector3 camera = vp.Pos;
+	DVector3 forward(vp.Angles.Yaw.Cos() * vp.Angles.Pitch.Cos(), vp.Angles.Yaw.Sin() * vp.Angles.Pitch.Cos(), -vp.Angles.Pitch.Sin());
+	VSMatrix &view = di->VPUniforms.mViewMatrix;
+
+	for (FDynamicLight *light = di->Level->lights; light; light = light->next)
+	{
+		if (!light->IsActive() || light->IsSubtractive() || !light->visibletoplayer) continue;
+		float radius = light->GetRadius();
+		if (radius <= 0) continue;
+		DVector3 delta = light->Pos - camera;
+		double dist = delta.Length();
+		if (dist > 2048.0 + radius) continue;
+		if ((delta | forward) < -radius) continue; // behind the camera
+		float r = light->GetRed() / 255.f, g = light->GetGreen() / 255.f, b = light->GetBlue() / 255.f;
+		float brightness = std::max({ r, g, b });
+		if (brightness <= 0.02f) continue;
+
+		// Doom space (x, y, height) to GL world space (x, height, y), then view space.
+		float world[4] = { (float)light->X(), (float)light->Z(), (float)light->Y(), 1.0f };
+		float eye[4];
+		view.multMatrixPoint(world, eye);
+
+		Candidate c;
+		c.score = brightness * radius / float(dist + 64.0);
+		c.pos = { eye[0], eye[1], -eye[2], radius };
+		c.color = { r, g, b, radius * 0.18f };
+		candidates.Push(c);
+	}
+
+	std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
+	FVector4 data[MaxVolumetricLights * 2];
+	int count = std::min((int)candidates.Size(), (int)MaxVolumetricLights);
+	for (int i = 0; i < count; i++)
+	{
+		data[i * 2] = candidates[i].pos;
+		data[i * 2 + 1] = candidates[i].color;
+	}
+	hw_postprocess.sceneEffects.SetVolumetricLights(data, count);
+}
+
+//-----------------------------------------------------------------------------
+//
 // Renders one viewpoint in a scene
 //
 //-----------------------------------------------------------------------------
@@ -126,6 +189,7 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 	}
 
 	screen->SetLevelMesh(camera->Level->levelMesh);
+	if (mainview && toscreen) GI_Update(camera->Level);
 
 	// Update the attenuation flag of all light defaults for each viewpoint.
 	// This function will only do something if the setting differs.
@@ -143,7 +207,7 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 
 		if (mainview) // Bind the scene frame buffer and turn on draw buffers used by ssao
 		{
-			bool useSSAO = (gl_ssao != 0);
+			bool useSSAO = PPAmbientOcclusion::GBufferNeeded();
 			screen->SetSceneRenderTarget(useSSAO);
 			RenderState.SetPassType(useSSAO ? GBUFFER_PASS : NORMAL_PASS);
 			RenderState.EnableDrawBuffers(RenderState.GetPassDrawBufferCount(), true);
@@ -169,9 +233,24 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 		di->VPUniforms.mProjectionMatrix = eye.GetProjection(fov, ratio, fovratio * inv_iso_dist, iso_ortho);
 		di->ProjectionMatrix2 = eye.GetProjection(fov, ratio, fovratio, false); // Regular ol' perspective projection matrix
 
+		// Temporal AA: jitter the 3D projection by a subpixel offset each frame.
+		bool temporal = mainview && toscreen && eyeCount == 1 && !iso_ortho;
+		VSMatrix unjittered = di->VPUniforms.mProjectionMatrix;
+		if (temporal)
+		{
+			FVector2 jitter = hw_postprocess.taa.BeginFrame(screen->mSceneViewport.width, screen->mSceneViewport.height);
+			FLOATTYPE m[16];
+			memcpy(m, unjittered.get(), sizeof(m));
+			m[8] -= jitter.X;
+			m[9] -= jitter.Y;
+			di->VPUniforms.mProjectionMatrix.loadMatrix(m);
+		}
+
 		// Stereo mode specific viewpoint adjustment
 		vp.Pos += eye.GetViewShift(vp.HWAngles.Yaw.Degrees());
 		di->SetupView(RenderState, vp.Pos.X, vp.Pos.Y, vp.Pos.Z, false, false);
+		if (mainview) CollectVolumetricLights(di);
+		if (temporal) hw_postprocess.taa.SetCamera(unjittered, di->VPUniforms.mViewMatrix, vp.Pos);
 
 		di->ProcessScene(toscreen);
 
@@ -321,8 +400,11 @@ static void CheckTimer(FRenderState &state, uint64_t ShaderStartTime)
 sector_t* RenderView(player_t* player)
 {
 	auto RenderState = screen->RenderState();
-	RenderState->SetVertexBuffer(screen->mVertexData);
-	screen->mVertexData->Reset();
+	if (RenderState != nullptr && screen->mVertexData != nullptr)
+	{
+		RenderState->SetVertexBuffer(screen->mVertexData);
+		screen->mVertexData->Reset();
+	}
 	hw_postprocess.SetTonemapMode(level.info ? level.info->tonemap : ETonemapMode::None);
 
 	sector_t* retsec;

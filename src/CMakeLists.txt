@@ -132,8 +132,12 @@ else()
 
 	# Non-Windows version also needs SDL except native OS X backend
 	if( NOT APPLE OR NOT OSX_COCOA_BACKEND )
-		find_package( SDL2 REQUIRED )
-		include_directories( SYSTEM "${SDL2_INCLUDE_DIR}" )
+		if(NOT GZDOOM_IOS AND NOT GZDOOM_WATCH)
+			find_package( SDL2 REQUIRED )
+		endif()
+		if(NOT GZDOOM_WATCH)
+			include_directories( SYSTEM "${SDL2_INCLUDE_DIR}" )
+		endif()
 		link_directories(${SDL2_LINK_DIR})
 		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} "${SDL2_LIBRARY}" )
 	endif()
@@ -141,7 +145,9 @@ else()
 endif()
 
 if( NOT NO_OPENAL )
-	if ( "vcpkg-openal-soft" IN_LIST VCPKG_MANIFEST_FEATURES )
+	if(TARGET OpenAL::OpenAL)
+		list(APPEND PROJECT_LIBRARIES OpenAL::OpenAL)
+	elseif ( "vcpkg-openal-soft" IN_LIST VCPKG_MANIFEST_FEATURES )
 		# Statically link to OpenAL from vcpkg
 		find_package( OpenAL CONFIG REQUIRED )
 		list( APPEND PROJECT_LIBRARIES OpenAL::OpenAL )
@@ -153,7 +159,7 @@ if( NOT NO_OPENAL )
 			mark_as_advanced(CLEAR OPENAL_LIBRARY)
 			if( OPENAL_LIBRARY )
 				set( PROJECT_LIBRARIES ${OPENAL_LIBRARY} ${PROJECT_LIBRARIES} )
-				if( APPLE )
+				if( APPLE AND NOT GZDOOM_IOS )
 					set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} "-framework AudioUnit -framework CoreAudio -framework ApplicationServices -framework AudioToolbox -framework CoreFoundation" )
 				endif()
 			else()
@@ -328,7 +334,9 @@ if (HAVE_VULKAN)
 	list( APPEND PROJECT_LIBRARIES "zvulkan" )
 endif()
 
-list( APPEND PROJECT_LIBRARIES "zwidget" )
+if(NOT GZDOOM_WATCH)
+	list( APPEND PROJECT_LIBRARIES "zwidget" )
+endif()
 list( APPEND PROJECT_LIBRARIES "webp" )
 
 message("Building for target architecture: ${TARGET_ARCHITECTURE}")
@@ -449,7 +457,26 @@ if( WIN32 )
 
 	set( SYSTEM_SOURCES ${SYSTEM_SOURCES} win32/zdoom.rc )
 elseif( APPLE )
-	if( OSX_COCOA_BACKEND )
+	if(GZDOOM_WATCH)
+		set(SYSTEM_SOURCES_DIR common/platform/watch common/platform/posix)
+		set(SYSTEM_SOURCES ${PLAT_POSIX_SOURCES}
+			common/platform/watch/watch_platform.mm common/platform/watch/watch_video.cpp
+			common/platform/ios/ios_specialpaths.mm)
+		set(OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_SDL_SOURCES} ${PLAT_COCOA_SOURCES} ${PLAT_OSX_SOURCES} ${PLAT_UNIX_SOURCES})
+	elseif(GZDOOM_IOS)
+		set(SYSTEM_SOURCES_DIR common/platform/posix common/platform/posix/sdl common/platform/ios)
+		set(SYSTEM_SOURCES ${PLAT_SDL_SOURCES})
+		list(REMOVE_ITEM SYSTEM_SOURCES common/platform/posix/sdl/i_main.cpp common/platform/posix/sdl/crashcatcher.c)
+		list(APPEND SYSTEM_SOURCES ${PLAT_POSIX_SOURCES}
+			common/platform/ios/ios_platform.mm
+			common/platform/ios/ios_hardware.mm common/platform/ios/ios_specialpaths.mm)
+		if(GZDOOM_TVOS)
+			list(APPEND SYSTEM_SOURCES common/platform/ios/tvos_controls.mm)
+		else()
+			list(APPEND SYSTEM_SOURCES common/platform/ios/ios_controls.mm)
+		endif()
+		set(OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_COCOA_SOURCES} ${PLAT_OSX_SOURCES} ${PLAT_UNIX_SOURCES})
+	elseif( OSX_COCOA_BACKEND )
 		set( SYSTEM_SOURCES_DIR common/platform/posix common/platform/posix/cocoa )
 		set( SYSTEM_SOURCES ${PLAT_COCOA_SOURCES} )
 		set( OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_SDL_SOURCES} ${PLAT_UNIX_SOURCES} )
@@ -460,7 +487,9 @@ elseif( APPLE )
 		set( OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_COCOA_SOURCES} ${PLAT_UNIX_SOURCES} )
 	endif()
 
-	set( SYSTEM_SOURCES ${SYSTEM_SOURCES} ${PLAT_POSIX_SOURCES} ${PLAT_OSX_SOURCES} )
+	if(NOT GZDOOM_IOS AND NOT GZDOOM_WATCH)
+		set( SYSTEM_SOURCES ${SYSTEM_SOURCES} ${PLAT_POSIX_SOURCES} ${PLAT_OSX_SOURCES} )
+	endif()
 
 	set_source_files_properties( posix/osx/zdoom.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources )
 	set_source_files_properties( common/platform/posix/osx/iwadpicker_cocoa.mm PROPERTIES COMPILE_FLAGS -fobjc-exceptions )
@@ -897,6 +926,7 @@ set (PCH_SOURCES
 	rendering/hwrenderer/hw_vertexbuilder.cpp
 	rendering/hwrenderer/doom_aabbtree.cpp
 	rendering/hwrenderer/doom_levelmesh.cpp
+	rendering/hwrenderer/hw_irradiance.cpp
 	rendering/hwrenderer/hw_models.cpp
 	rendering/hwrenderer/hw_precache.cpp
 	rendering/hwrenderer/scene/hw_lighting.cpp
@@ -1126,6 +1156,7 @@ set (PCH_SOURCES
 	common/rendering/hwrenderer/data/hw_viewpointbuffer.cpp
 	common/rendering/hwrenderer/data/hw_modelvertexbuffer.cpp
 	common/rendering/hwrenderer/data/hw_cvars.cpp
+	common/rendering/hwrenderer/data/hw_modernrender.cpp
 	common/rendering/hwrenderer/data/hw_vrmodes.cpp
 	common/rendering/hwrenderer/data/hw_lightbuffer.cpp
 	common/rendering/hwrenderer/data/hw_bonebuffer.cpp
@@ -1264,10 +1295,21 @@ set( GAME_SOURCES
 
 )
 
+if(GZDOOM_WATCH)
+	# The native Watch library replaces the desktop launcher and its widgets.
+	list(FILTER GAME_SOURCES EXCLUDE REGEX "^launcher/.*\\.cpp$")
+	list(FILTER GAME_SOURCES EXCLUDE REGEX "^common/widgets/.*\\.cpp$")
+endif()
+
 set( GAME_NONPCH_SOURCES ${GAME_SOURCES} )
 list( REMOVE_ITEM GAME_NONPCH_SOURCES ${PCH_SOURCES} )
 
-add_executable( zdoom WIN32 MACOSX_BUNDLE ${GAME_SOURCES} )
+if(GZDOOM_WATCH)
+	add_library(zdoom STATIC ${GAME_SOURCES})
+	set_target_properties(zdoom PROPERTIES OUTPUT_NAME gzdoom-watch ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+else()
+	add_executable( zdoom WIN32 MACOSX_BUNDLE ${GAME_SOURCES} )
+endif()
 
 target_precompile_headers( zdoom PRIVATE g_pch.h )
 
@@ -1383,7 +1425,7 @@ else()
 	)
 endif()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
   set_target_properties(zdoom PROPERTIES LINK_FLAGS "-z nostart-stop-gc")
 endif()
 
@@ -1490,7 +1532,14 @@ if( DEM_CMAKE_COMPILER_IS_GNUCXX_COMPATIBLE )
 		APPEND_STRING PROPERTY COMPILE_FLAGS " ${SSE2_ENABLE}" )
 endif()
 
-if( APPLE )
+if(GZDOOM_WATCH)
+	target_link_libraries(zdoom "-framework Foundation" "-framework CoreGraphics")
+	set_source_files_properties(common/platform/watch/watch_platform.mm common/platform/ios/ios_specialpaths.mm
+		PROPERTIES COMPILE_FLAGS "-fobjc-arc -fobjc-exceptions")
+	include("${CMAKE_SOURCE_DIR}/watchos/App.cmake")
+elseif(GZDOOM_IOS)
+	include("${CMAKE_SOURCE_DIR}/ios/App.cmake")
+elseif( APPLE )
 	set( LINK_FRAMEWORKS "-framework Cocoa -framework IOKit -framework OpenGL")
 
 	if( HAVE_VULKAN )
@@ -1506,6 +1555,21 @@ if( APPLE )
 	# Dymanic libraries like libvulkan.dylib or libMoltenVK.dylib will be loaded by dlopen()
 	# if placed in the directory with the main executable
 	set( CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rpath @executable_path" )
+	if(GZDOOM_MOLTENVK_ROOT)
+		add_custom_command(TARGET zdoom POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${GZDOOM_MOLTENVK_ROOT}/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$<TARGET_FILE_DIR:zdoom>/libMoltenVK.dylib")
+	endif()
+	option(GZDOOM_BUNDLE_TEST_WADS "Include local vendor IWADs for development testing" OFF)
+	add_custom_command(TARGET zdoom POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:zdoom>/Games")
+	if(GZDOOM_BUNDLE_TEST_WADS)
+		file(GLOB TEST_WADS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/vendor/*.wad" "${CMAKE_SOURCE_DIR}/vendor/*.WAD")
+		foreach(TEST_WAD IN LISTS TEST_WADS)
+			add_custom_command(TARGET zdoom POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:zdoom>/Games"
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TEST_WAD}" "$<TARGET_FILE_DIR:zdoom>/Games/")
+		endforeach()
+	endif()
 endif()
 
 if ( NOT ZMUSIC_SYSTEM_INSTALL )

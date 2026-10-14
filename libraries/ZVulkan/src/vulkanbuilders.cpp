@@ -1839,6 +1839,11 @@ std::vector<VulkanCompatibleDevice> VulkanDeviceBuilder::FindDevices(const std::
 		VulkanCompatibleDevice dev;
 		dev.Device = &instance->PhysicalDevices[idx];
 		dev.EnabledDeviceExtensions = requiredDeviceExtensions;
+		for (const auto &ext : info.Extensions)
+		{
+			if (strcmp(ext.extensionName, "VK_KHR_portability_subset") == 0)
+				dev.EnabledDeviceExtensions.insert(ext.extensionName);
+		}
 
 		// Enable optional extensions we are interested in, if they are available on this device
 		for (const auto& ext : dev.Device->Extensions)

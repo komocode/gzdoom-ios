@@ -183,6 +183,7 @@ static const char *shaderBindings = R"(
 
 	layout(set = 0, binding = 0) uniform sampler2D ShadowMap;
 	layout(set = 0, binding = 1) uniform sampler2DArray LightMap;
+	layout(set = 0, binding = 3) uniform sampler2DArray IrradianceVolume;
 	#ifdef SUPPORTS_RAYTRACING
 	layout(set = 0, binding = 2) uniform accelerationStructureEXT TopLevelAS;
 	#endif
@@ -207,6 +208,16 @@ static const char *shaderBindings = R"(
 
 		float uThickFogDistance;
 		float uThickFogMultiplier;
+
+		int uRenderFeatures;
+		float uGIStrength;
+		float uGISaturation;
+		float uSpecularStrength;
+		float uNormalStrength;
+		float uViewPadding0;
+		float uViewPadding1;
+		vec4 uGIOrigin;
+		vec4 uGISize;
 	};
 
 	layout(set = 1, binding = 1, std140) uniform readonly MatricesUBO {
@@ -245,7 +256,8 @@ static const char *shaderBindings = R"(
 
 		vec4 uDetailParms;
 		vec4 uNpotEmulation;
-		vec4 padding1, padding2, padding3;
+		vec4 uMaterialParams;
+		vec4 padding2, padding3;
 	};
 
 	layout(set = 1, binding = 2, std140) uniform readonly StreamUBO {
@@ -350,6 +362,7 @@ static const char *shaderBindings = R"(
 	#define uSplitBottomPlane data[uDataIndex].uSplitBottomPlane
 	#define uDetailParms data[uDataIndex].uDetailParms
 	#define uNpotEmulation data[uDataIndex].uNpotEmulation
+	#define uMaterialParams data[uDataIndex].uMaterialParams
 
 	#define SUPPORTS_SHADOWMAPS
 	#define VULKAN_COORDINATE_SYSTEM

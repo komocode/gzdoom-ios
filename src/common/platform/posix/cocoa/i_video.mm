@@ -53,6 +53,8 @@
 #include "v_text.h"
 #include "v_video.h"
 #include "version.h"
+#include "hw_modernrender.h"
+#include <sys/sysctl.h>
 #ifdef HAVE_GLES2
 #include "gles_framebuffer.h"
 #endif
@@ -389,6 +391,13 @@ public:
 	{
 		assert(ms_window == nil);
 		ms_window = CreateWindow(STYLE_MASK_WINDOWED);
+
+		// Every Apple Silicon Mac (M1 and later) runs the high preset; machines
+		// with 16 GB or more are Pro/Max class or newer and run ultra.
+		uint64_t memory = 0;
+		size_t size = sizeof(memory);
+		sysctlbyname("hw.memsize", &memory, &size, nullptr, 0);
+		R_SetAutoPreset(memory >= (16ull << 30) ? RP_ULTRA : RP_HIGH);
 
 		const NSRect contentRect = [ms_window contentRectForFrameRect:[ms_window frame]];
 		SystemBaseFrameBuffer *fb = nullptr;

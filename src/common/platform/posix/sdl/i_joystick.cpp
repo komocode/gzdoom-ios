@@ -715,6 +715,10 @@ void I_GetAxes(float axes[NUM_AXIS_CODES])
 	{
 		JoystickManager->AddAxes(axes);
 	}
+#ifdef GZDOOM_IOS
+	extern void IOS_AddTouchAxes(float *);
+	IOS_AddTouchAxes(axes);
+#endif
 }
 
 void I_Rumble(double high_freq, double low_freq, double left_trig, double right_trig)

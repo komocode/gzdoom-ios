@@ -59,6 +59,7 @@
 */
 
 
+#include "hw_irradiance.h"
 #include <math.h>
 #include <cmath>	// needed for std::floor on mac
 #include "maploader.h"
@@ -3252,7 +3253,9 @@ void MapLoader::LoadLevel(MapData *map, const char *lumpname, int position)
 
 	InitRenderInfo();				// create hardware independent renderer resources for the level. This must be done BEFORE the PolyObj Spawn!!!
 	Level->ClearDynamic3DFloorData();	// CreateVBO must be run on the plain 3D floor data.
-	CreateVBO(screen->mVertexData, Level->sectors);
+	// Software-only displays have no hardware vertex buffer to populate.
+	if (screen->mVertexData != nullptr)
+		CreateVBO(screen->mVertexData, Level->sectors);
 
 	screen->InitLightmap(Level->LMTextureSize, Level->LMTextureCount, Level->LMTextureData);
 
@@ -3272,6 +3275,7 @@ void MapLoader::LoadLevel(MapData *map, const char *lumpname, int position)
 
 	Level->aabbTree = new DoomLevelAABBTree(Level);
 	Level->levelMesh = new DoomLevelMesh(*Level);
+	GI_LevelLoaded(Level);
 
 	// [DVR] Populate subsector->bbox for alternative space culling in orthographic projection with no fog of war
 	subsector_t* sub = &Level->subsectors[0];

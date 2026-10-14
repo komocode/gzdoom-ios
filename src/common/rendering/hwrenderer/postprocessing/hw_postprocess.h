@@ -4,6 +4,7 @@
 #include <memory>
 #include <map>
 #include "intrect.h"
+#include "matrix.h"
 
 struct PostProcessShader;
 
@@ -21,6 +22,7 @@ enum class ETonemapMode : uint8_t
 	Reinhard,
 	Linear,
 	Palette,
+	ACES,
 	NumTonemapModes
 };
 
@@ -363,7 +365,45 @@ struct BlurUniforms
 	}
 };
 
-enum { NumBloomLevels = 4 };
+enum { NumBloomLevels = 6, NumClassicBloomLevels = 4 };
+
+struct BloomDownUniforms
+{
+	FVector2 Scale;
+	FVector2 Offset;
+	FVector2 InvSize;	// texel size of the input
+	float Threshold;
+	float Knee;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Scale", UniformType::Vec2, offsetof(BloomDownUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(BloomDownUniforms, Offset) },
+			{ "InvSize", UniformType::Vec2, offsetof(BloomDownUniforms, InvSize) },
+			{ "Threshold", UniformType::Float, offsetof(BloomDownUniforms, Threshold) },
+			{ "Knee", UniformType::Float, offsetof(BloomDownUniforms, Knee) },
+		};
+	}
+};
+
+struct BloomUpUniforms
+{
+	FVector2 InvSize;	// texel size of the input
+	float Intensity;
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "InvSize", UniformType::Vec2, offsetof(BloomUpUniforms, InvSize) },
+			{ "Intensity", UniformType::Float, offsetof(BloomUpUniforms, Intensity) },
+			{ "Padding", UniformType::Float, offsetof(BloomUpUniforms, Padding) },
+		};
+	}
+};
 
 class PPBlurLevel
 {
@@ -394,6 +434,12 @@ private:
 	PPShader BloomExtract = { "shaders/pp/bloomextract.fp", "", ExtractUniforms::Desc() };
 	PPShader BlurVertical = { "shaders/pp/blur.fp", "#define BLUR_VERTICAL\n", BlurUniforms::Desc() };
 	PPShader BlurHorizontal = { "shaders/pp/blur.fp", "#define BLUR_HORIZONTAL\n", BlurUniforms::Desc() };
+
+	// Progressive (downsample/upsample) bloom
+	void RenderModernBloom(PPRenderState *renderstate, int sceneWidth, int sceneHeight);
+	PPShader BloomPrefilter = { "shaders/pp/bloom_down.fp", "#define PREFILTER\n", BloomDownUniforms::Desc() };
+	PPShader BloomDown = { "shaders/pp/bloom_down.fp", "", BloomDownUniforms::Desc() };
+	PPShader BloomUp = { "shaders/pp/bloom_up.fp", "", BloomUpUniforms::Desc() };
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -568,6 +614,7 @@ private:
 	PPShader HejlDawsonShader = { "shaders/pp/tonemap.fp", "#define HEJLDAWSON\n", {} };
 	PPShader Uncharted2Shader = { "shaders/pp/tonemap.fp", "#define UNCHARTED2\n", {} };
 	PPShader PaletteShader = { "shaders/pp/tonemap.fp", "#define PALETTE\n", {} };
+	PPShader ACESShader = { "shaders/pp/tonemap.fp", "#define ACES\n", {} };
 	ETonemapMode level_tonemap = ETonemapMode::None;
 };
 
@@ -682,6 +729,7 @@ class PPAmbientOcclusion
 public:
 	PPAmbientOcclusion();
 	void Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight);
+	static bool GBufferNeeded();
 
 private:
 	void CreateShaders();
@@ -718,6 +766,211 @@ private:
 
 	enum { NumAmbientRandomTextures = 3 };
 	PPTexture AmbientRandomTexture[NumAmbientRandomTextures];
+};
+
+struct ReflectionUniforms
+{
+	FVector2 UVToViewA;
+	FVector2 UVToViewB;
+	FVector2 Scale;
+	FVector2 Offset;
+	FVector2 InvSize;	// texel size of the linear depth texture
+	float Strength;
+	float MaxDistance;
+	float Thickness;
+	int Steps;
+	int SampleIndex;
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "UVToViewA", UniformType::Vec2, offsetof(ReflectionUniforms, UVToViewA) },
+			{ "UVToViewB", UniformType::Vec2, offsetof(ReflectionUniforms, UVToViewB) },
+			{ "Scale", UniformType::Vec2, offsetof(ReflectionUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(ReflectionUniforms, Offset) },
+			{ "InvSize", UniformType::Vec2, offsetof(ReflectionUniforms, InvSize) },
+			{ "Strength", UniformType::Float, offsetof(ReflectionUniforms, Strength) },
+			{ "MaxDistance", UniformType::Float, offsetof(ReflectionUniforms, MaxDistance) },
+			{ "Thickness", UniformType::Float, offsetof(ReflectionUniforms, Thickness) },
+			{ "Steps", UniformType::Int, offsetof(ReflectionUniforms, Steps) },
+			{ "SampleIndex", UniformType::Int, offsetof(ReflectionUniforms, SampleIndex) },
+			{ "Padding", UniformType::Float, offsetof(ReflectionUniforms, Padding) },
+		};
+	}
+};
+
+// The uniforms are push constants on Vulkan. 7 lights keep the block at
+// 256 bytes, which every desktop driver and MoltenVK accept.
+enum { MaxVolumetricLights = 7 };
+
+struct VolumetricUniforms
+{
+	FVector2 UVToViewA;
+	FVector2 UVToViewB;
+	float Strength;
+	int LightCount;
+	float Padding0, Padding1;
+	FVector4 Lights[MaxVolumetricLights * 2];	// view space position + radius, color + core size
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "UVToViewA", UniformType::Vec2, offsetof(VolumetricUniforms, UVToViewA) },
+			{ "UVToViewB", UniformType::Vec2, offsetof(VolumetricUniforms, UVToViewB) },
+			{ "Strength", UniformType::Float, offsetof(VolumetricUniforms, Strength) },
+			{ "LightCount", UniformType::Int, offsetof(VolumetricUniforms, LightCount) },
+			{ "Padding0", UniformType::Float, offsetof(VolumetricUniforms, Padding0) },
+			{ "Padding1", UniformType::Float, offsetof(VolumetricUniforms, Padding1) },
+			{ "Lights[14]", UniformType::Vec4, offsetof(VolumetricUniforms, Lights) },
+		};
+	}
+};
+
+static_assert(sizeof(VolumetricUniforms) <= 256, "volumetric uniforms must fit 256 bytes of push constants");
+
+struct CompositeUniforms
+{
+	FVector2 Scale;
+	FVector2 Offset;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Scale", UniformType::Vec2, offsetof(CompositeUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(CompositeUniforms, Offset) },
+		};
+	}
+};
+
+// Screen-space reflections and volumetric light scattering. Both run after
+// the opaque geometry, reuse the SSAO linear depth and are composited into
+// the scene before translucent objects are drawn.
+class PPSceneEffects
+{
+public:
+	void Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight, PPTexture *linearDepth, int depthWidth, int depthHeight);
+	void SetVolumetricLights(const FVector4 *lights, int count);
+	bool Active() const;
+
+private:
+	void UpdateTextures(int width, int height);
+
+	int Width = 0, Height = 0;
+	PPTexture Reflections;
+	PPTexture Volumetrics;
+	PPTexture Indirect;
+	VolumetricUniforms Volumetric = {};
+
+	PPShader Reflect = { "shaders/pp/ssr.fp", "", ReflectionUniforms::Desc() };
+	PPShader ReflectMS = { "shaders/pp/ssr.fp", "#define MULTISAMPLE\n", ReflectionUniforms::Desc() };
+	PPShader Gather = { "shaders/pp/ssgi.fp", "", ReflectionUniforms::Desc() };
+	PPShader GatherMS = { "shaders/pp/ssgi.fp", "#define MULTISAMPLE\n", ReflectionUniforms::Desc() };
+	PPShader Scatter = { "shaders/pp/volumetric.fp", "", VolumetricUniforms::Desc() };
+	PPShader Composite = { "shaders/pp/composite.fp", "", CompositeUniforms::Desc() };
+};
+
+struct TemporalUniforms
+{
+	float Reprojection[16];	// current view space to previous frame clip space
+	FVector2 UVToViewA;
+	FVector2 UVToViewB;
+	FVector2 Scale;
+	FVector2 Offset;
+	FVector2 InvSize;
+	FVector2 Jitter;	// this frame's subpixel offset in scene UV units
+	float LinearizeDepthA;
+	float LinearizeDepthB;
+	float Feedback;	// history weight, 0 discards the history
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "Reprojection", UniformType::Mat4, offsetof(TemporalUniforms, Reprojection) },
+			{ "UVToViewA", UniformType::Vec2, offsetof(TemporalUniforms, UVToViewA) },
+			{ "UVToViewB", UniformType::Vec2, offsetof(TemporalUniforms, UVToViewB) },
+			{ "Scale", UniformType::Vec2, offsetof(TemporalUniforms, Scale) },
+			{ "Offset", UniformType::Vec2, offsetof(TemporalUniforms, Offset) },
+			{ "InvSize", UniformType::Vec2, offsetof(TemporalUniforms, InvSize) },
+			{ "Jitter", UniformType::Vec2, offsetof(TemporalUniforms, Jitter) },
+			{ "LinearizeDepthA", UniformType::Float, offsetof(TemporalUniforms, LinearizeDepthA) },
+			{ "LinearizeDepthB", UniformType::Float, offsetof(TemporalUniforms, LinearizeDepthB) },
+			{ "Feedback", UniformType::Float, offsetof(TemporalUniforms, Feedback) },
+			{ "Padding", UniformType::Float, offsetof(TemporalUniforms, Padding) },
+		};
+	}
+};
+
+// Temporal anti-aliasing. The 3D projection is jittered by a subpixel Halton
+// offset each frame; this pass reprojects last frame's result through the
+// depth buffer and camera motion, clamps it to the current neighbourhood (which
+// also stops ghosting on moving sprites, which have no motion vectors) and
+// blends. Runs on the HDR scene before bloom and tone mapping.
+class PPTemporalAA
+{
+public:
+	// Called by the scene renderer for the main view; returns the projection jitter in NDC.
+	FVector2 BeginFrame(int sceneWidth, int sceneHeight);
+	void SetCamera(const VSMatrix &projection, const VSMatrix &view, const DVector3 &pos);
+	void Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight);
+	bool Enabled() const;
+
+private:
+	void UpdateTextures(int width, int height);
+
+	int Width = 0, Height = 0;
+	PPTexture History;
+	bool HistoryValid = false;
+	bool CameraValid = false;
+	bool PrevValid = false;
+	unsigned FrameIndex = 0;
+	FVector2 JitterNDC = { 0.0f, 0.0f };
+	VSMatrix CurProj, CurView, PrevProj, PrevView;
+	DVector3 CurPos, PrevPos;
+	uint64_t LastFrame = 0;
+
+	PPShader Resolve = { "shaders/pp/taa.fp", "", TemporalUniforms::Desc() };
+	PPShader Copy = { "shaders/pp/composite.fp", "", CompositeUniforms::Desc() };
+};
+
+struct FinishUniforms
+{
+	FVector2 InvSize;
+	float Sharpen;
+	float Vignette;
+	float Grain;
+	float Time;
+	float Aspect;
+	float Padding;
+
+	static std::vector<UniformFieldDesc> Desc()
+	{
+		return
+		{
+			{ "InvSize", UniformType::Vec2, offsetof(FinishUniforms, InvSize) },
+			{ "Sharpen", UniformType::Float, offsetof(FinishUniforms, Sharpen) },
+			{ "Vignette", UniformType::Float, offsetof(FinishUniforms, Vignette) },
+			{ "Grain", UniformType::Float, offsetof(FinishUniforms, Grain) },
+			{ "Time", UniformType::Float, offsetof(FinishUniforms, Time) },
+			{ "Aspect", UniformType::Float, offsetof(FinishUniforms, Aspect) },
+			{ "Padding", UniformType::Float, offsetof(FinishUniforms, Padding) },
+		};
+	}
+};
+
+// Contrast-adaptive sharpening, vignette and film grain in one pass.
+class PPFinish
+{
+public:
+	void Render(PPRenderState *renderstate);
+
+private:
+	PPShader Finish = { "shaders/pp/finish.fp", "", FinishUniforms::Desc() };
 };
 
 struct PresentUniforms
@@ -839,6 +1092,9 @@ public:
 	PPColormap colormap;
 	PPTonemap tonemap;
 	PPAmbientOcclusion ssao;
+	PPSceneEffects sceneEffects;
+	PPTemporalAA taa;
+	PPFinish finish;
 	PPPresent present;
 	PPShadowMap shadowmap;
 	PPCustomShaders customShaders;

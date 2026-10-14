@@ -201,7 +201,8 @@ struct StreamData
 
 	FVector4 uDetailParms;
 	FVector4 uNpotEmulation;
-	FVector4 padding1, padding2, padding3;
+	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint
+	FVector4 padding2, padding3;
 };
 
 class FRenderState
@@ -306,6 +307,7 @@ public:
 		mStreamData.uDetailParms = { 0.0f, 0.0f, 0.0f, 0.0f };
 #ifdef NPOT_EMULATION
 		mStreamData.uNpotEmulation = { 0,0,0,0 };
+		mStreamData.uMaterialParams = { 0,0,0,0 };
 #endif
 		mModelMatrix.loadIdentity();
 		mTextureMatrix.loadIdentity();
@@ -509,6 +511,12 @@ public:
 	void SetAddColor(PalEntry pe)
 	{
 		mStreamData.uAddColor = pe;
+	}
+
+	// z enables parallax occlusion mapping; only solid walls and flats set it.
+	void SetMaterialParams(float reflectivity, float gloss, bool parallax = false)
+	{
+		mStreamData.uMaterialParams = { reflectivity, gloss, parallax ? 1.f : 0.f, 0 };
 	}
 
 	void SetNpotEmulation(float factor, float offset)

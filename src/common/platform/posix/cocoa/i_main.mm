@@ -222,7 +222,13 @@ int DoMain(int argc, char** argv)
 	Args = new FArgs(argc, argv);
 
 	NSString* exePath = [[NSBundle mainBundle] executablePath];
-	progdir = [[exePath stringByDeletingLastPathComponent] UTF8String];
+	NSString* resourcePath = [[NSBundle mainBundle] resourcePath];
+	// Signed Apple bundles keep game data in Resources. Preserve the legacy
+	// executable-adjacent layout used by the upstream desktop build as well.
+	if ([[NSFileManager defaultManager] fileExistsAtPath:[resourcePath stringByAppendingPathComponent:@"gzdoom.pk3"]])
+		progdir = [resourcePath UTF8String];
+	else
+		progdir = [[exePath stringByDeletingLastPathComponent] UTF8String];
 	progdir += "/";
 
 	auto ret = GameMain();

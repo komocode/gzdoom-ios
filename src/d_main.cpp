@@ -298,8 +298,16 @@ CUSTOM_CVAR (String, vid_cursor, "None", CVAR_ARCHIVE | CVAR_NOINITCALL)
 
 // Controlled by startup dialog
 CVAR(Bool, disableautoload, false, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
-CVAR(Bool, autoloadbrightmaps, false, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
-CVAR(Bool, autoloadlights, false, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
+// The Apple port has no startup dialog to turn these on, and the modern
+// lighting (specular, volumetrics, baked GI) builds on the stock light and
+// brightmap definitions, so load them by default there.
+#ifdef __APPLE__
+#define APPLE_AUTOLOAD_DEFAULT true
+#else
+#define APPLE_AUTOLOAD_DEFAULT false
+#endif
+CVAR(Bool, autoloadbrightmaps, APPLE_AUTOLOAD_DEFAULT, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
+CVAR(Bool, autoloadlights, APPLE_AUTOLOAD_DEFAULT, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
 CVAR(Bool, autoloadwidescreen, true, CVAR_ARCHIVE | CVAR_NOINITCALL | CVAR_GLOBALCONFIG)
 CVAR(Bool, r_debug_disable_vis_filter, false, 0)
 CVAR(Int, vid_showpalette, 0, 0)
@@ -3938,6 +3946,7 @@ void SignalHandler(int signal)
 
 int GameMain()
 {
+#ifndef GZDOOM_WATCH
 	// On Windows, prefer the native win32 backend.
 	// On other platforms, use SDL until the other backends are more mature.
 	auto zwidget = DisplayBackend::TryCreateWin32();
@@ -3949,6 +3958,7 @@ int GameMain()
 		return -1;
     }
 	DisplayBackend::Set(std::move(zwidget));
+#endif
 
 	int ret = 0;
 	GameTicRate = TICRATE;

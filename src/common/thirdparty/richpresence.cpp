@@ -1,3 +1,6 @@
+#if defined(GZDOOM_IOS) || defined(GZDOOM_WATCH)
+void I_UpdateDiscordPresence(bool, const char*, const char*, const char*) {}
+#else
 /*
 ** richpresence.cpp
 **
@@ -127,3 +130,5 @@ void I_UpdateDiscordPresence(bool SendPresence, const char* curstatus, const cha
 	}
 }
 
+
+#endif

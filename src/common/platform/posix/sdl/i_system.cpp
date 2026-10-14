@@ -75,7 +75,7 @@
 #ifndef NO_GTK
 bool I_GtkAvailable ();
 void I_ShowFatalError_Gtk(const char* errortext);
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(GZDOOM_IOS)
 int I_PickIWad_Cocoa (WadStuff *wads, int numwads, bool showwin, int defaultiwad);
 #endif
 
@@ -93,6 +93,9 @@ void I_SetIWADInfo()
 
 extern "C" int I_FileAvailable(const char* filename)
 {
+#ifdef GZDOOM_IOS
+	return 0;
+#else
 	FString cmd = "which {0} >/dev/null 2>&1";
 	cmd.Substitute("{0}", filename);
 
@@ -103,6 +106,7 @@ extern "C" int I_FileAvailable(const char* filename)
 	}
 
 	return 0;
+#endif
 }
 
 //
@@ -348,7 +352,9 @@ bool I_PickIWad (bool showwin, FStartupSelectionInfo& info)
 		return true;
 	}
 
-#ifdef __APPLE__
+#ifdef GZDOOM_IOS
+	return true; // The native game library has already chosen the IWAD.
+#elif defined(__APPLE__)
 	const int ret = I_PickIWad_Cocoa(&(*info.Wads)[0], (int)info.Wads->Size(), showwin, info.DefaultIWAD);
 	if (ret >= 0)
 	{
@@ -418,6 +424,9 @@ unsigned int I_MakeRNGSeed()
 
 void I_OpenShellFolder(const char* infolder)
 {
+#ifdef GZDOOM_IOS
+	Printf("Game files are available in the Files app under GZDoom.\n");
+#else
 	char* curdir = getcwd(NULL,0);
 
 	if (!chdir(infolder))
@@ -435,6 +444,7 @@ void I_OpenShellFolder(const char* infolder)
 			Printf("Unable to open requested directory\n");
 	}
 	free(curdir);
+#endif
 }
 
 bool I_IsDarkMode()

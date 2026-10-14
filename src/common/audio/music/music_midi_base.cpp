@@ -41,7 +41,13 @@
 #include "c_cvars.h"
 #include "printf.h"
 
+#if defined(GZDOOM_IOS)
+#define DEF_MIDIDEV -3 // Native OPL synthesis is available on every iOS device.
+#elif defined(ZMUSIC_NO_FLUIDSYNTH)
+#define DEF_MIDIDEV -2 // Use the bundled SF2-capable TiMidity++ backend.
+#else
 #define DEF_MIDIDEV -5
+#endif
 
 EXTERN_CVAR(Int, snd_mididevice)
 

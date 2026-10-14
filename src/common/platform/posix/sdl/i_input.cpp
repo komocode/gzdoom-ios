@@ -607,6 +607,10 @@ void I_GetEvent ()
 
 void I_StartTic ()
 {
+#ifdef GZDOOM_IOS
+	extern void IOS_UpdatePlatform();
+	IOS_UpdatePlatform();
+#endif
 	I_CheckGUICapture ();
 	I_CheckNativeMouse ();
 	I_GetEvent ();

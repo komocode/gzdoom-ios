@@ -13,6 +13,11 @@ project(ZMusic
 	LANGUAGES C CXX
 )
 
+option(ZMUSIC_WITH_FLUIDSYNTH "Build the FluidSynth backend (requires GLib on POSIX)" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "tvOS" OR CMAKE_SYSTEM_NAME STREQUAL "watchOS")
+	set(ZMUSIC_WITH_FLUIDSYNTH OFF CACHE BOOL "" FORCE)
+endif()
+
 if (VCPKG_TOOLCHAIN)
 	if(VCPKG_TARGET_TRIPLET MATCHES "-static$")
  		set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -124,8 +129,10 @@ if(MSVC)
 else()
 	add_compile_options("-ffp-contract=off")
 
-	if(APPLE)
-		set(CMAKE_OSX_DEPLOYMENT_TARGET "10.9")
+	if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+			set(CMAKE_OSX_DEPLOYMENT_TARGET "10.9")
+		endif()
 		if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 			# With standard Apple tools -stdlib=libc++ needs to be specified in order to get
 			# C++11 support using SDKs 10.7 and 10.8.

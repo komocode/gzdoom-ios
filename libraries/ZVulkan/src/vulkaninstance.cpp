@@ -76,6 +76,9 @@ void VulkanInstance::CreateInstance()
 	// Enable optional instance extensions we are interested in
 	for (const auto& ext : AvailableExtensions)
 	{
+		// MoltenVK devices participate in Vulkan's portability enumeration.
+		if (strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+			EnabledExtensions.insert(ext.extensionName);
 		if (OptionalExtensions.find(ext.extensionName) != OptionalExtensions.end())
 		{
 			EnabledExtensions.insert(ext.extensionName);
@@ -104,6 +107,8 @@ void VulkanInstance::CreateInstance()
 
 		VkInstanceCreateInfo createInfo = {};
 		createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+		if (EnabledExtensions.count(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+			createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 		createInfo.pApplicationInfo = &appInfo;
 		createInfo.enabledExtensionCount = (uint32_t)EnabledExtensions.size();
 		createInfo.enabledLayerCount = (uint32_t)enabledValidationLayersCStr.size();

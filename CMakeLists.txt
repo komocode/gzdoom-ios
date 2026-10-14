@@ -31,6 +31,41 @@ endif()
 
 project(GZDoom)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "watchOS")
+	set(GZDOOM_WATCH ON)
+	enable_language(OBJC OBJCXX)
+	add_compile_definitions(GZDOOM_WATCH=1)
+	set(HAVE_VM_JIT OFF CACHE BOOL "" FORCE)
+	set(HAVE_VULKAN OFF CACHE BOOL "" FORCE)
+	set(HAVE_GLES2 OFF CACHE BOOL "" FORCE)
+	set(OSX_COCOA_BACKEND OFF CACHE BOOL "" FORCE)
+	set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+	set(NO_OPENAL ON CACHE BOOL "" FORCE)
+	set(DYN_SNDFILE OFF CACHE BOOL "" FORCE)
+	set(DYN_MPG123 OFF CACHE BOOL "" FORCE)
+	set(FORCE_INTERNAL_BZIP2 ON CACHE BOOL "" FORCE)
+	set(FORCE_INTERNAL_ZMUSIC ON CACHE BOOL "" FORCE)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+	set(GZDOOM_IOS ON)
+	if(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+		set(GZDOOM_TVOS ON)
+		add_compile_definitions(GZDOOM_TVOS=1)
+	endif()
+	enable_language(OBJC OBJCXX)
+	add_compile_definitions(GZDOOM_IOS=1)
+	# App Store devices cannot execute a desktop JIT or load desktop libraries.
+	set(HAVE_VM_JIT OFF CACHE BOOL "" FORCE)
+	set(OSX_COCOA_BACKEND OFF CACHE BOOL "" FORCE)
+	set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+	set(DYN_OPENAL OFF CACHE BOOL "" FORCE)
+	set(DYN_SNDFILE OFF CACHE BOOL "" FORCE)
+	set(DYN_MPG123 OFF CACHE BOOL "" FORCE)
+	set(FORCE_INTERNAL_BZIP2 ON CACHE BOOL "" FORCE)
+	set(FORCE_INTERNAL_ZMUSIC ON CACHE BOOL "" FORCE)
+endif()
+
 if (WIN32 AND VCPKG_TOOLCHAIN)
 	option(LIBVPX_VCPKG "Use libvpx from vcpkg" OFF)
 endif()
@@ -51,6 +86,26 @@ find_package(Threads REQUIRED)
 
 list( APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake )
 include( FindPackageHandleStandardArgs )
+
+if(GZDOOM_IOS OR SDL2_DIR)
+	find_package(SDL2 CONFIG REQUIRED)
+	set(SDL2_LIBRARY SDL2::SDL2)
+endif()
+
+if(GZDOOM_OPENAL_SOURCE)
+	set(LIBTYPE STATIC CACHE STRING "" FORCE)
+	set(ALSOFT_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
+	set(ALSOFT_TESTS OFF CACHE BOOL "" FORCE)
+	set(ALSOFT_INSTALL OFF CACHE BOOL "" FORCE)
+	set(ALSOFT_BACKEND_COREAUDIO ON CACHE BOOL "" FORCE)
+	add_subdirectory("${GZDOOM_OPENAL_SOURCE}" apple-openal EXCLUDE_FROM_ALL)
+	# Xcode 27 annotates CoreAudio callbacks with function effects. OpenAL's
+	# noexcept mixer callback is compatible but older releases lack the annotation.
+	if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
+		target_compile_options(OpenAL PRIVATE -Wno-error=function-effects)
+	endif()
+endif()
 
 # Support cross compiling
 option( FORCE_CROSSCOMPILE "Turn on cross compiling." NO )
@@ -227,7 +282,7 @@ include( TargetArch )
 
 target_architecture(TARGET_ARCHITECTURE)
 
-if( ${TARGET_ARCHITECTURE} MATCHES "x86_64" )
+if( ${TARGET_ARCHITECTURE} MATCHES "x86_64" AND NOT GZDOOM_IOS AND NOT GZDOOM_WATCH )
 	set( HAVE_VM_JIT ON )
 endif()
 
@@ -314,9 +369,13 @@ else()
 	set( DEB_C_FLAGS "" )
 
 	if( APPLE )
-		list(PREPEND CMAKE_PREFIX_PATH "/opt/local")    # port
-		list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew") # brew
-		set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
+		if(NOT GZDOOM_IOS AND NOT GZDOOM_WATCH)
+			list(PREPEND CMAKE_PREFIX_PATH "/opt/local")    # port
+			list(PREPEND CMAKE_PREFIX_PATH "/opt/homebrew") # brew
+			if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+				set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
+			endif()
+		endif()
 		if( CMAKE_CXX_COMPILER_ID STREQUAL "GNU" )
 			# If we're compiling with a custom GCC on the Mac (which we know since g++-4.2 doesn't support C++11) statically link libgcc.
 			set( ALL_C_FLAGS "-static-libgcc" )
@@ -356,14 +415,18 @@ if (HAVE_VULKAN)
 endif()
 
 set(ZWIDGET_BUILD_EXAMPLE OFF CACHE INTERNAL "" FORCE)
-add_subdirectory( libraries/ZWidget )
+if(NOT GZDOOM_WATCH)
+	add_subdirectory( libraries/ZWidget )
+endif()
 
 add_subdirectory( libraries/webp )
 
-add_subdirectory( libraries/discordrpc EXCLUDE_FROM_ALL )
 set( DRPC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libraries/discordrpc/include" )
-set( DRPC_LIBRARIES discord-rpc )
-set( DRPC_LIBRARY discord-rpc )
+if(NOT GZDOOM_IOS AND NOT GZDOOM_WATCH)
+	add_subdirectory( libraries/discordrpc EXCLUDE_FROM_ALL )
+	set( DRPC_LIBRARIES discord-rpc )
+	set( DRPC_LIBRARY discord-rpc )
+endif()
 
 if( HAVE_VM_JIT AND UNIX )
 	check_symbol_exists( "backtrace" "execinfo.h" HAVE_BACKTRACE )
