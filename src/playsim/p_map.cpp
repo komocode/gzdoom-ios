@@ -92,6 +92,7 @@
 #include "r_utility.h"
 #include "shadowinlines.h"
 #include "vm.h"
+#include "hw_gpuparticles.h"
 
 // State.
 
@@ -4812,8 +4813,11 @@ AActor *P_LineAttack(AActor *t1, DAngle angle, double distance,
 	}
 
 	// Perform the trace.
-	if (!Trace(tempos, t1->Sector, direction, distance, MF_SHOOTABLE, 
-		ML_BLOCKEVERYTHING | ML_BLOCKHITSCAN, t1, trace, tflags, CheckForActor, &TData))
+	bool traced = Trace(tempos, t1->Sector, direction, distance, MF_SHOOTABLE, 
+		ML_BLOCKEVERYTHING | ML_BLOCKHITSCAN, t1, trace, tflags, CheckForActor, &TData);
+	if (!nointeract && !(flags & LAF_ISMELEEATTACK))
+		FX_HitscanFired(t1, tempos, traced ? trace.HitPos : tempos + direction * distance, angle);
+	if (!traced)
 	{ // hit nothing
 		if (!nointeract && puffDefaults && puffDefaults->ActiveSound.isvalid())
 		{ // Play miss sound
@@ -4857,8 +4861,10 @@ AActor *P_LineAttack(AActor *t1, DAngle angle, double distance,
 			{
 				DVector2 pos = t1->Level->GetPortalOffsetPosition(trace.HitPos.X, trace.HitPos.Y, -trace.HitVector.X * 4, -trace.HitVector.Y * 4);
 				puffpos = DVector3(pos, trace.HitPos.Z - trace.HitVector.Z * 4);
+				FX_SetImpactSurface(trace);
 				puff = P_SpawnPuff(t1, pufftype, puffpos, trace.SrcAngleFromTarget,
 					trace.SrcAngleFromTarget - DAngle::fromDeg(90), 0, puffFlags);
+				FX_ClearImpactSurface();
 				puff->radius = 1/65536.;
 
 				if (nointeract)
@@ -6263,6 +6269,7 @@ int P_RadiusAttack(AActor *bombspot, AActor *bombsource, int bombdamage, double 
 	}
 
 	P_GeometryRadiusAttack(bombspot, bombsource, bombdamage, bombdistance, bombmod, fulldamagedistance);
+	if (bombdamage >= 32) FX_Explosion(bombspot, bombdistance, bombdamage); // not damage auras
 
 	TArray<AActor*> targets;
 	int count = 0;

@@ -5,8 +5,9 @@ See the [project README](../README.md) for supported platforms and major changes
 ## Toolchain and dependencies
 
 Install Xcode and its command line tools, CMake, Ninja, and Python 3. The build
-script downloads and verifies SDL 2.32.10, MoltenVK 1.4.2, OpenAL Soft 1.25.2,
-and libvpx 1.15.2 in ignored build directories. A tracked OpenAL allocator patch
+script downloads and verifies SDL 2.32.10, MoltenVK 1.4.2, SPIRV-Cross
+(vulkan-sdk-1.4.309.0), OpenAL Soft 1.25.2, and libvpx 1.15.2 in ignored build
+directories. A tracked OpenAL allocator patch
 fixes small-alignment allocations on Apple platforms.
 
 The portable Apple builds exclude FluidSynth's desktop GLib dependency. OPL is
@@ -79,19 +80,21 @@ Low Power Mode, and thermal state.
 | --- | --- | --- |
 | A10/A12 or less than 3 GiB RAM | 60 FPS, up to 720p | 1x samples, 4x anisotropy |
 | Apple family 6+ in the 4 GB RAM class | 60 FPS, up to 1080p | 2x samples, 8x anisotropy |
-| Apple family 7+ in the 6 GB RAM class | Up to 120 Hz, up to 1440p | 2x samples, 16x anisotropy, SSAO and bloom |
-| Apple family 9+ in the 8 GB RAM class | Up to 120 Hz, up to 1600p | 4x samples, 16x anisotropy, SSAO and bloom |
+| Apple family 7+ in the 6 GB RAM class | Up to 120 Hz, 1440p 3D | TAA with temporal upscaling to up to 1.25x, 16x anisotropy, SSAO and bloom |
+| Apple family 9+ in the 8 GB RAM class | Up to 120 Hz, 1600p 3D | TAA with temporal upscaling to up to 1.25x, 16x anisotropy, SSAO and bloom |
 
 Apple TV budgets range from 720p / 1x samples on A8 to 1080p / 2x on A10X,
-1440p / 2x on A12, and 2160p / 2x on A15 or newer, at up to 60 FPS. Rendering is
+1440p 3D with TAA on A12, and 2160p with TAA on A15 or newer, at up to 60 FPS. Rendering is
 limited by drawable resolution, supported sample counts, and GPU anisotropy limits.
 Simulators use reduced budgets. Low Power Mode and heat lower quality; normal
 settings return when conditions improve. These are quality budgets, not guaranteed
 frame rates.
 
-Vulkan rendering uses Metal through MoltenVK. The current backend does not expose
-`VK_KHR_ray_query`, so GZDoom ray tracing is disabled. Mobile builds also exclude
-desktop OpenGL, executable-memory JIT, desktop Discord integration, and process
+The native Metal renderer is the default (`vid_preferbackend 4`); Vulkan through
+MoltenVK remains selectable. On GPUs with Metal ray tracing, Metal
+traces dynamic-light shadows when `vk_raytrace` is on. MetalFX performs temporal
+upscaling where available (not on tvOS). Mobile builds also exclude desktop
+OpenGL, executable-memory JIT, desktop Discord integration, and process
 launching.
 
 ## Validation

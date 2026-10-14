@@ -24,6 +24,9 @@ endif()
 target_link_libraries(zdoom SDL2::SDL2main "-framework UIKit" "-framework Metal" "-framework QuartzCore" "-framework AVFoundation" "-framework GameController")
 if(NOT GZDOOM_TVOS)
     target_link_libraries(zdoom "-framework UniformTypeIdentifiers")
+    if(NOT CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        target_link_libraries(zdoom "-weak_framework MetalFX")
+    endif()
 endif()
 set_target_properties(zdoom PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST "${APPLE_INFO_PLIST}"

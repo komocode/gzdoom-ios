@@ -234,6 +234,10 @@ public:
 
 	std::unique_ptr<VulkanShader> Create(const char *shadername, VulkanDevice *device);
 
+	// Compiles to SPIR-V without creating a Vulkan shader module (used by backends
+	// that translate SPIR-V further, such as Metal through SPIRV-Cross).
+	std::vector<unsigned int> CreateSpirv(const char *shadername, bool vulkan12);
+
 private:
 	std::vector<std::pair<std::string, std::string>> sources;
 	std::function<ShaderIncludeResult(std::string headerName, std::string includerName, size_t inclusionDepth)> onIncludeSystem;

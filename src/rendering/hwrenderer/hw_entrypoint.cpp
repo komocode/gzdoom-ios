@@ -205,6 +205,11 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 		const auto& eye = vrmode->mEyes[eye_ix];
 		screen->SetViewportRects(bounds);
 
+		// Temporal AA (and upscaling): the main view of a single-eye perspective camera.
+		bool iso_ortho = (camera->ViewPos != NULL) && (camera->ViewPos->Flags & VPSF_ORTHOGRAPHIC);
+		bool temporal = mainview && toscreen && eyeCount == 1 && !iso_ortho;
+		if (temporal) screen->mSceneViewport = hw_postprocess.taa.BeginUpscale(screen->mSceneViewport);
+
 		if (mainview) // Bind the scene frame buffer and turn on draw buffers used by ssao
 		{
 			bool useSSAO = PPAmbientOcclusion::GBufferNeeded();
@@ -228,13 +233,11 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 
 		// Stereo mode specific perspective projection
 		float inv_iso_dist = 1.0f;
-		bool iso_ortho = (camera->ViewPos != NULL) && (camera->ViewPos->Flags & VPSF_ORTHOGRAPHIC);
 		if (iso_ortho && (camera->ViewPos->Offset.Length() > 0)) inv_iso_dist = 1.0/camera->ViewPos->Offset.Length();
 		di->VPUniforms.mProjectionMatrix = eye.GetProjection(fov, ratio, fovratio * inv_iso_dist, iso_ortho);
 		di->ProjectionMatrix2 = eye.GetProjection(fov, ratio, fovratio, false); // Regular ol' perspective projection matrix
 
 		// Temporal AA: jitter the 3D projection by a subpixel offset each frame.
-		bool temporal = mainview && toscreen && eyeCount == 1 && !iso_ortho;
 		VSMatrix unjittered = di->VPUniforms.mProjectionMatrix;
 		if (temporal)
 		{
@@ -267,6 +270,10 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 
 			screen->PostProcessScene(false, cm, flash, [&]() { di->DrawEndScene2D(mainvp.sector, RenderState); });
 			PostProcess.Unclock();
+		}
+		if (temporal)
+		{
+			hw_postprocess.taa.EndUpscale(); // the resolve normally restores the full viewport itself
 		}
 		// Reset colormap so 2D drawing isn't affected
 		RenderState.SetSpecialColormap(CM_DEFAULT, 1);

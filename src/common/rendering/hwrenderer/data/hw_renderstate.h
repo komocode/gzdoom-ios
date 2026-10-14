@@ -201,7 +201,7 @@ struct StreamData
 
 	FVector4 uDetailParms;
 	FVector4 uNpotEmulation;
-	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint
+	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint, z = parallax, w = particle time
 	FVector4 padding2, padding3;
 };
 
@@ -307,8 +307,8 @@ public:
 		mStreamData.uDetailParms = { 0.0f, 0.0f, 0.0f, 0.0f };
 #ifdef NPOT_EMULATION
 		mStreamData.uNpotEmulation = { 0,0,0,0 };
-		mStreamData.uMaterialParams = { 0,0,0,0 };
 #endif
+		mStreamData.uMaterialParams = { 0,0,0,0 };
 		mModelMatrix.loadIdentity();
 		mTextureMatrix.loadIdentity();
 		ClearClipSplit();
@@ -517,6 +517,13 @@ public:
 	void SetMaterialParams(float reflectivity, float gloss, bool parallax = false)
 	{
 		mStreamData.uMaterialParams = { reflectivity, gloss, parallax ? 1.f : 0.f, 0 };
+	}
+
+	// w > 0 switches the scene shaders to GPU particle mode; w is the current time
+	// in seconds and z selects the additive (1) or alpha-blended (0) particles.
+	void SetParticleParams(float now, bool additive)
+	{
+		mStreamData.uMaterialParams = { 0, 0, additive ? 1.f : 0.f, now > 1e-3f ? now : 1e-3f };
 	}
 
 	void SetNpotEmulation(float factor, float offset)

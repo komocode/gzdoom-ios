@@ -882,10 +882,12 @@ struct TemporalUniforms
 	FVector2 Offset;
 	FVector2 InvSize;
 	FVector2 Jitter;	// this frame's subpixel offset in scene UV units
+	FVector2 InputScale;	// the rendered (possibly smaller) part of the scene buffers
+	FVector2 InputOffset;
 	float LinearizeDepthA;
 	float LinearizeDepthB;
 	float Feedback;	// history weight, 0 discards the history
-	float Padding;
+	float Upscale;	// 1 when the input is smaller than the output
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
@@ -898,10 +900,12 @@ struct TemporalUniforms
 			{ "Offset", UniformType::Vec2, offsetof(TemporalUniforms, Offset) },
 			{ "InvSize", UniformType::Vec2, offsetof(TemporalUniforms, InvSize) },
 			{ "Jitter", UniformType::Vec2, offsetof(TemporalUniforms, Jitter) },
+			{ "InputScale", UniformType::Vec2, offsetof(TemporalUniforms, InputScale) },
+			{ "InputOffset", UniformType::Vec2, offsetof(TemporalUniforms, InputOffset) },
 			{ "LinearizeDepthA", UniformType::Float, offsetof(TemporalUniforms, LinearizeDepthA) },
 			{ "LinearizeDepthB", UniformType::Float, offsetof(TemporalUniforms, LinearizeDepthB) },
 			{ "Feedback", UniformType::Float, offsetof(TemporalUniforms, Feedback) },
-			{ "Padding", UniformType::Float, offsetof(TemporalUniforms, Padding) },
+			{ "Upscale", UniformType::Float, offsetof(TemporalUniforms, Upscale) },
 		};
 	}
 };
@@ -911,17 +915,37 @@ struct TemporalUniforms
 // depth buffer and camera motion, clamps it to the current neighbourhood (which
 // also stops ghosting on moving sprites, which have no motion vectors) and
 // blends. Runs on the HDR scene before bloom and tone mapping.
+//
+// With r_upscale below 1 it is also a temporal upscaler: the 3D scene is
+// rendered into a smaller part of the scene viewport, and the resolve
+// reconstructs the full viewport from the jittered samples of many frames.
+// Everything after it (exposure, bloom, tone mapping, the weapon and the HUD)
+// runs at full resolution.
 class PPTemporalAA
 {
 public:
+	// Called before the 3D scene is rendered: returns the viewport to render it
+	// into, which is smaller than the scene viewport when upscaling.
+	IntRect BeginUpscale(const IntRect &sceneViewport);
 	// Called by the scene renderer for the main view; returns the projection jitter in NDC.
 	FVector2 BeginFrame(int sceneWidth, int sceneHeight);
 	void SetCamera(const VSMatrix &projection, const VSMatrix &view, const DVector3 &pos);
 	void Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight);
+	// Restores the full scene viewport if the resolve didn't run.
+	void EndUpscale();
 	bool Enabled() const;
 
 private:
 	void UpdateTextures(int width, int height);
+	bool PlatformUpscale(PPRenderState *renderstate, const TemporalUniforms &u, bool reset);
+
+	// Inputs and output of a platform upscaler (MetalFX)
+	PPTexture UpscaleColor, UpscaleDepth, UpscaleMotion, UpscaleOutput;
+	int UpscaleInputWidth = 0, UpscaleInputHeight = 0, UpscaleOutputWidth = 0, UpscaleOutputHeight = 0;
+
+	bool Upscaling = false;
+	IntRect OutputViewport = {};
+	float UpscaleRatio = 1.0f;
 
 	int Width = 0, Height = 0;
 	PPTexture History;
@@ -935,6 +959,8 @@ private:
 	uint64_t LastFrame = 0;
 
 	PPShader Resolve = { "shaders/pp/taa.fp", "", TemporalUniforms::Desc() };
+	PPShader UpscaleDepthShader = { "shaders/pp/taainputs.fp", "", TemporalUniforms::Desc() };
+	PPShader UpscaleMotionShader = { "shaders/pp/taainputs.fp", "#define MOTION\n", TemporalUniforms::Desc() };
 	PPShader Copy = { "shaders/pp/composite.fp", "", CompositeUniforms::Desc() };
 };
 

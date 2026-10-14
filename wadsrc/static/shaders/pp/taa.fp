@@ -6,6 +6,12 @@ layout(location=0) out vec4 FragColor;
 // jitter; last frame's result is reprojected through the depth buffer and the
 // camera motion, clipped to this frame's 3x3 neighbourhood colour range (which
 // rejects stale history from moving sprites and disocclusions) and blended.
+//
+// When upscaling, the input covers a smaller part of the buffers (InputScale,
+// InputOffset) than the output (Scale, Offset). Each output pixel is then
+// reconstructed from the nearby input samples, weighted by their distance to
+// the pixel after removing this frame's jitter, and the history is trusted more
+// where no sample landed close to the pixel.
 
 layout(binding=0) uniform sampler2D InputTexture;
 layout(binding=1) uniform sampler2D HistoryTexture;
@@ -24,29 +30,45 @@ vec3 FromYCoCg(vec3 c)
 void main()
 {
 	vec2 uv = TexCoord;
-	vec3 current = textureLod(InputTexture, uv, 0.0).rgb;
 	vec2 s = (uv - Offset) / Scale;
-	if (Feedback <= 0.0 || any(lessThan(s, vec2(0.0))) || any(greaterThan(s, vec2(1.0))))
-	{
-		FragColor = vec4(current, 1.0);
-		return;
-	}
 
-	// Neighbourhood statistics, and the nearest depth so edges reproject with
-	// the foreground.
+	// Input texel position of this output pixel in the jittered input image.
+	vec2 inUV = Upscale > 0.5 ? InputOffset + (s + Jitter) * InputScale : uv;
+	vec2 texelPos = inUV / InvSize - 0.5;
+	vec2 nearest = floor(texelPos + 0.5);
+
+	// Neighbourhood statistics, the reconstructed current colour, and the
+	// nearest depth so edges reproject with the foreground.
 	vec3 m1 = vec3(0.0);
 	vec3 m2 = vec3(0.0);
+	vec3 sum = vec3(0.0);
+	float weightSum = 0.0;
+	float confidence = 0.0;
 	float depth = 1.0;
 	for (int y = -1; y <= 1; y++)
 	{
 		for (int x = -1; x <= 1; x++)
 		{
-			vec2 tuv = uv + vec2(x, y) * InvSize;
-			vec3 c = ToYCoCg(textureLod(InputTexture, tuv, 0.0).rgb);
+			vec2 tuv = Upscale > 0.5 ? (nearest + vec2(x, y) + 0.5) * InvSize : uv + vec2(x, y) * InvSize;
+			vec3 rgb = textureLod(InputTexture, tuv, 0.0).rgb;
+			vec3 c = ToYCoCg(rgb);
 			m1 += c;
 			m2 += c * c;
 			depth = min(depth, textureLod(DepthTexture, tuv, 0.0).x);
+			vec2 d = nearest + vec2(x, y) - texelPos;
+			float w = exp(-2.3 * dot(d, d));
+			sum += rgb * w;
+			weightSum += w;
+			confidence = max(confidence, w);
 		}
+	}
+	vec3 current = Upscale > 0.5 ? sum / weightSum : textureLod(InputTexture, uv, 0.0).rgb;
+	if (Upscale < 0.5) confidence = 1.0;
+
+	if (Feedback <= 0.0 || any(lessThan(s, vec2(0.0))) || any(greaterThan(s, vec2(1.0))))
+	{
+		FragColor = vec4(current, 1.0);
+		return;
 	}
 
 	float z = 1.0 / (clamp(depth, 0.0, 1.0) * LinearizeDepthA + LinearizeDepthB);
@@ -77,9 +99,11 @@ void main()
 		h = center + d / maxRatio;
 	history = FromYCoCg(h);
 
-	// Fast motion keeps less history so it stays sharp.
+	// Fast motion keeps less history so it stays sharp. When upscaling, a
+	// sample far from this pixel counts for less than one that hit it.
 	float pixels = length((s - prev) * vec2(1.0 / InvSize.x, 1.0 / InvSize.y) * Scale);
 	float feedback = Feedback * mix(1.0, 0.8, clamp(pixels / 16.0, 0.0, 1.0));
+	feedback = 1.0 - (1.0 - feedback) * mix(0.25, 1.0, confidence);
 
 	// Luminance-weighted blend so bright HDR pixels don't dominate (no fireflies).
 	float wc = (1.0 - feedback) / (1.0 + dot(current, vec3(0.299, 0.587, 0.114)));

@@ -1456,6 +1456,32 @@ bool PPTemporalAA::Enabled() const
 	return r_taa && gl_multisample <= 1;
 }
 
+IntRect PPTemporalAA::BeginUpscale(const IntRect &sceneViewport)
+{
+	Upscaling = false;
+	UpscaleRatio = 1.0f;
+	float ratio = clamp<float>(r_upscale, 0.5f, 1.0f);
+	if (!Enabled() || ratio > 0.99f || sceneViewport.width < 64 || sceneViewport.height < 64)
+		return sceneViewport;
+
+	Upscaling = true;
+	UpscaleRatio = ratio;
+	OutputViewport = sceneViewport;
+	IntRect input = sceneViewport;
+	input.width = max(1, (int)round(sceneViewport.width * ratio));
+	input.height = max(1, (int)round(sceneViewport.height * ratio));
+	return input;
+}
+
+void PPTemporalAA::EndUpscale()
+{
+	if (Upscaling)
+	{
+		screen->mSceneViewport = OutputViewport;
+		Upscaling = false;
+	}
+}
+
 FVector2 PPTemporalAA::BeginFrame(int sceneWidth, int sceneHeight)
 {
 	CameraValid = false;
@@ -1469,7 +1495,9 @@ FVector2 PPTemporalAA::BeginFrame(int sceneWidth, int sceneHeight)
 	// A pause in 3D rendering (menus, wipes, console) invalidates the history.
 	if (screen->FrameTime - LastFrame > 250)
 		HistoryValid = false;
-	FrameIndex = FrameIndex % 8 + 1;
+	// Upscaling needs more distinct sample positions per output pixel.
+	unsigned phases = Upscaling ? (UpscaleRatio < 0.7f ? 32 : 16) : 8;
+	FrameIndex = FrameIndex % phases + 1;
 	JitterNDC.X = (Halton(FrameIndex, 2) - 0.5f) * 2.0f / sceneWidth;
 	JitterNDC.Y = (Halton(FrameIndex, 3) - 0.5f) * 2.0f / sceneHeight;
 	return JitterNDC;
@@ -1495,12 +1523,81 @@ void PPTemporalAA::UpdateTextures(int width, int height)
 	HistoryValid = false;
 }
 
+bool PPTemporalAA::PlatformUpscale(PPRenderState *renderstate, const TemporalUniforms &u, bool reset)
+{
+	// Render-resolution inputs: color, depth and camera motion of the rendered region.
+	int inputWidth = max(1, (int)round(u.InputScale.X * screen->mScreenViewport.width));
+	int inputHeight = max(1, (int)round(u.InputScale.Y * screen->mScreenViewport.height));
+	int outputWidth = screen->mSceneViewport.width;
+	int outputHeight = screen->mSceneViewport.height;
+	if (inputWidth != UpscaleInputWidth || inputHeight != UpscaleInputHeight)
+	{
+		UpscaleColor = { inputWidth, inputHeight, PixelFormat::Rgba16f };
+		UpscaleDepth = { inputWidth, inputHeight, PixelFormat::R32f };
+		UpscaleMotion = { inputWidth, inputHeight, PixelFormat::Rg16f };
+		UpscaleInputWidth = inputWidth;
+		UpscaleInputHeight = inputHeight;
+		reset = true;
+	}
+	if (outputWidth != UpscaleOutputWidth || outputHeight != UpscaleOutputHeight)
+	{
+		UpscaleOutput = { outputWidth, outputHeight, PixelFormat::Rgba16f };
+		UpscaleOutputWidth = outputWidth;
+		UpscaleOutputHeight = outputHeight;
+		reset = true;
+	}
+
+	renderstate->PushGroup("upscale");
+
+	CompositeUniforms copy;
+	copy.Scale = u.InputScale;
+	copy.Offset = u.InputOffset;
+	renderstate->Clear();
+	renderstate->Shader = &Copy;
+	renderstate->Uniforms.Set(copy);
+	renderstate->Viewport = { 0, 0, inputWidth, inputHeight };
+	renderstate->SetInputCurrent(0, PPFilterMode::Nearest);
+	renderstate->SetOutputTexture(&UpscaleColor);
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	for (int pass = 0; pass < 2; pass++)
+	{
+		renderstate->Clear();
+		renderstate->Shader = pass == 0 ? &UpscaleDepthShader : &UpscaleMotionShader;
+		renderstate->Uniforms.Set(u);
+		renderstate->Viewport = { 0, 0, inputWidth, inputHeight };
+		renderstate->SetInputSceneDepth(0);
+		renderstate->SetOutputTexture(pass == 0 ? &UpscaleDepth : &UpscaleMotion);
+		renderstate->SetNoBlend();
+		renderstate->Draw();
+	}
+
+	// The projection was offset by Jitter (scene UV units) this frame.
+	screen->PlatformTemporalUpscale(&UpscaleColor, &UpscaleDepth, &UpscaleMotion, &UpscaleOutput, u.Jitter.X * inputWidth, u.Jitter.Y * inputHeight, reset);
+
+	copy.Scale = { 1.0f, 1.0f };
+	copy.Offset = { 0.0f, 0.0f };
+	renderstate->Clear();
+	renderstate->Shader = &Copy;
+	renderstate->Uniforms.Set(copy);
+	renderstate->Viewport = screen->mSceneViewport;
+	renderstate->SetInputTexture(0, &UpscaleOutput, PPFilterMode::Nearest);
+	renderstate->SetOutputNext();
+	renderstate->SetNoBlend();
+	renderstate->Draw();
+
+	renderstate->PopGroup();
+	return true;
+}
+
 void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneHeight)
 {
 	if (!Enabled() || !CameraValid)
 	{
 		HistoryValid = false;
 		PrevValid = false;
+		EndUpscale();
 		return;
 	}
 	CameraValid = false;
@@ -1525,6 +1622,12 @@ void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneH
 	reprojection.multMatrix(PrevView);
 	reprojection.multMatrix(invView);
 
+	// The scene was rendered into the input viewport; the result covers the full scene viewport.
+	FVector2 inputScale = screen->SceneScale();
+	FVector2 inputOffset = screen->SceneOffset();
+	bool upscaling = Upscaling;
+	EndUpscale();
+
 	TemporalUniforms u;
 	const FLOATTYPE *m = reprojection.get();
 	for (int i = 0; i < 16; i++)
@@ -1538,10 +1641,22 @@ void PPTemporalAA::Render(PPRenderState *renderstate, int sceneWidth, int sceneH
 	u.Offset = screen->SceneOffset();
 	u.InvSize = { 1.0f / screen->mScreenViewport.width, 1.0f / screen->mScreenViewport.height };
 	u.Jitter = { JitterNDC.X * 0.5f, JitterNDC.Y * 0.5f };
+	u.InputScale = inputScale;
+	u.InputOffset = inputOffset;
 	u.LinearizeDepthA = 1.0f / screen->GetZFar() - 1.0f / screen->GetZNear();
 	u.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
 	u.Feedback = HistoryValid ? 0.9f : 0.0f;
-	u.Padding = 0.0f;
+	u.Upscale = upscaling ? 1.0f : 0.0f;
+
+	if (upscaling && r_upscale_metalfx && screen->SupportsPlatformUpscaler() && PlatformUpscale(renderstate, u, !HistoryValid))
+	{
+		HistoryValid = true;
+		PrevValid = true;
+		PrevProj = CurProj;
+		PrevView = CurView;
+		PrevPos = CurPos;
+		return;
+	}
 
 	renderstate->PushGroup("taa");
 

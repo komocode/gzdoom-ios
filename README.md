@@ -16,12 +16,16 @@ iPad, Mac, and Apple TV builds, plus an Apple Watch rendering preview.
   checksum-pinned dependencies and development signing.
 - Added an iPhone/iPad game library, WAD import, multitouch controls, controller
   and keyboard input, a native text-entry keyboard, and iPad rotation/resizing.
+- Added a native Metal renderer (`vid_preferbackend 4`, the default on Apple). It
+  runs the Vulkan backend's GLSL, translated to Metal Shading Language with
+  SPIRV-Cross, and adds ray traced dynamic-light shadows on GPUs with Metal ray
+  tracing and MetalFX temporal upscaling.
 - Added GPU quality profiles based on Metal capabilities, memory, display refresh
   rate, thermal state, and Low Power Mode. Unsupported renderer features are
-  disabled; ray tracing remains unavailable through the current MoltenVK backend.
-- Added Vulkan portability support, supported sample-count and anisotropy limits,
-  texture upload synchronization fixes, and a base-vertex fallback for older GPU
-  families and simulators.
+  disabled.
+- Added Vulkan portability support (MoltenVK remains selectable), supported
+  sample-count and anisotropy limits, texture upload synchronization fixes, and a
+  base-vertex fallback for older GPU families and simulators.
 - Added native tvOS packaging, controller input, and Apple TV quality profiles.
 - Added Watch software rendering at the panel's native resolution with filtered
   textures, coloured dynamic lights and a light CPU post-process, plus a SwiftUI
@@ -30,7 +34,8 @@ iPad, Mac, and Apple TV builds, plus an Apple Watch rendering preview.
 - Added an optional modern rendering pipeline: baked irradiance-probe GI, soft
   dynamic-light shadows, derived normal/roughness/metallic/height detail, parallax
   occlusion mapping, screen-space reflections and GI, volumetric light, ACES tone
-  mapping, progressive bloom and TAA. Quality presets (`r_preset`, with Classic
+  mapping, progressive bloom, TAA with temporal upscaling, and GPU impact and
+  explosion particles. Quality presets (`r_preset`, with Classic
   keeping the original look) are chosen per device. See
   [Apple rendering](docs/apple-rendering.md).
 - Added portable Apple audio dependencies, fixed OpenAL effect/filter allocation,

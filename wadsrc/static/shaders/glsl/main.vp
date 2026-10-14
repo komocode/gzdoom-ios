@@ -35,9 +35,113 @@ struct BonesResult
 
 BonesResult ApplyBones();
 
+#ifndef SIMPLE
+// GPU particles (hw_gpuparticles.cpp). Every attribute is constant for the
+// particle's lifetime and the motion is evaluated in closed form:
+//   aPosition = start position, start time    aNormal   = velocity, gravity
+//   aVertex2  = life, start size, end size, drag
+//   aLightmap = brightness (< 0: alpha blended), floor height, streak time
+//   aTexCoord = quad corner + 2 * shape
+//   aNormal2  = plane of the surface it came from (normal, distance), faded against
+void ParticleVertex()
+{
+	float shape = floor(aTexCoord.x * 0.5);
+	vec2 corner = vec2(aTexCoord.x - 2.0 * shape, aTexCoord.y) * 2.0 - 1.0;
+	float age = uMaterialParams.w - aPosition.w;
+	float life = aVertex2.x;
+	bool additive = aLightmap.x >= 0.0;
+
+	vTexCoord = vec4(corner, fract(sin(dot(aPosition.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453), shape);
+	vColor = vec4(0.0);
+	vLightmap = vec3(0.0);
+	glowdist = vec3(0.0);
+	gradientdist = vec3(0.0);
+	vWorldNormal = vec4(0.0, 1.0, 0.0, 1.0);
+	vEyeNormal = vec4(0.0, 0.0, 1.0, 1.0);
+
+	#ifdef NO_CLIPDISTANCE_SUPPORT
+	ClipDistanceA = vec4(1.0);
+	ClipDistanceB = vec4(1.0);
+	#else
+	gl_ClipDistance[0] = 1.0;
+	gl_ClipDistance[1] = 1.0;
+	gl_ClipDistance[2] = 1.0;
+	gl_ClipDistance[3] = 1.0;
+	gl_ClipDistance[4] = 1.0;
+	#endif
+
+	if (age < 0.0 || age >= life || additive != (uMaterialParams.z > 0.5))
+	{
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside the view volume: the quad is clipped away
+		pixelpos = vec4(0.0);
+		return;
+	}
+
+	float k = aVertex2.w;
+	float e = exp(-k * age);
+	vec3 terminal = vec3(0.0, aNormal.w / k, 0.0);
+	vec3 pos = aPosition.xyz + terminal * age + (aNormal.xyz - terminal) * ((1.0 - e) / k);
+	vec3 vel = (aNormal.xyz - terminal) * e + terminal;
+
+	float t = age / life;
+	float size = mix(aVertex2.y, aVertex2.z, t);
+	float rest = aLightmap.y + size * 0.5;
+	if (pos.y <= rest)
+	{
+		pos.y = rest; // particles settle on the floor below them
+		vel = vec3(vel.x, 0.0, vel.z) * 0.25;
+	}
+
+	vec4 eye = ViewMatrix * vec4(pos, 1.0);
+	vec2 axis;
+	float len = size;
+	vec2 eyeVel = (ViewMatrix * vec4(vel, 0.0)).xy;
+	float speed = length(eyeVel);
+	if (aLightmap.z > 0.0 && speed > 1.0)
+	{
+		axis = eyeVel / speed; // sparks stretch along their motion
+		len = max(size, speed * aLightmap.z);
+	}
+	else
+	{
+		float a = vTexCoord.z * 6.2831853 + age * (vTexCoord.z - 0.5) * 1.5; // slow random spin
+		axis = vec2(cos(a), sin(a));
+	}
+	vec2 offset = axis * (corner.x * len) + vec2(-axis.y, axis.x) * (corner.y * size);
+	eye.xy += offset;
+
+	// The fragment shader fades the particle where it meets its source surface
+	// and the floor, which needs the world position of each corner.
+	vec3 worldOffset = inverse(mat3(ViewMatrix)) * vec3(offset, 0.0);
+	vWorldNormal = aNormal2;
+	glowdist = vec3(aLightmap.y, max(size * 0.6, 0.5), 0.0);
+
+	// Fade in over a frame, out over the lifetime (solid chips, casings and
+	// droplets only at the end), and away close to the camera.
+	float fadeOut = shape >= 2.0 ? 1.0 - smoothstep(0.75, 1.0, t) : pow(1.0 - t, shape == 1.0 ? 1.0 : 1.5);
+	float fade = min(age * 30.0, 1.0) * fadeOut;
+	fade *= clamp((-eye.z - 4.0) / 24.0, 0.0, 1.0);
+	vColor = vec4(aColor.rgb * abs(aLightmap.x), aColor.a * fade);
+
+	pixelpos = vec4(pos + worldOffset, -eye.z);
+	gl_Position = ProjectionMatrix * eye;
+	#ifdef VULKAN_COORDINATE_SYSTEM
+	gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0;
+	#endif
+}
+#endif
+
 void main()
 {
 	float ClipDistance0, ClipDistance1, ClipDistance2, ClipDistance3, ClipDistance4;
+
+	#ifndef SIMPLE
+	if (uMaterialParams.w > 0.0)
+	{
+		ParticleVertex();
+		return;
+	}
+	#endif
 
 	vec2 parmTexCoord;
 	vec4 parmPosition;

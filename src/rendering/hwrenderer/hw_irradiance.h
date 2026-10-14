@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vectors.h"
+#include "textureid.h"
 
 struct FLevelLocals;
 struct HWViewpointUniforms;
@@ -22,3 +23,6 @@ void GI_LevelLoaded(FLevelLocals *level);
 void GI_LevelUnloaded();
 void GI_Update(FLevelLocals *level);
 void GI_SetUniforms(HWViewpointUniforms &uniforms);
+
+// Average colour of a texture (cached, main thread only).
+FVector3 GI_TextureAlbedo(FTextureID id);

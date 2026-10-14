@@ -107,6 +107,21 @@ if(GZDOOM_OPENAL_SOURCE)
 	endif()
 endif()
 
+if(GZDOOM_SPIRV_CROSS_SOURCE AND APPLE AND NOT GZDOOM_WATCH)
+	# SPIR-V to MSL translation for the native Metal renderer.
+	add_library(spirv-cross-msl STATIC
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_cross.cpp"
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_parser.cpp"
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_cross_parsed_ir.cpp"
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_cfg.cpp"
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_glsl.cpp"
+		"${GZDOOM_SPIRV_CROSS_SOURCE}/spirv_msl.cpp")
+	target_include_directories(spirv-cross-msl PUBLIC "${GZDOOM_SPIRV_CROSS_SOURCE}")
+	# MoltenVK embeds its own copy; keep ours in a separate namespace.
+	target_compile_definitions(spirv-cross-msl PUBLIC SPIRV_CROSS_NAMESPACE_OVERRIDE=gzd_spirv_cross)
+	set(HAVE_METAL ON)
+endif()
+
 # Support cross compiling
 option( FORCE_CROSSCOMPILE "Turn on cross compiling." NO )
 if( FORCE_CROSSCOMPILE )

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -19,8 +20,18 @@ DOWNLOADS = [
     ('openal-soft-1.25.2.tar.gz', 'https://github.com/kcat/openal-soft/archive/refs/tags/1.25.2.tar.gz', 'fb27e5839aa11f0e5b9d33756965291fad5d6909ab928ea1f796f4a1a6877894', 'openal-soft-1.25.2'),
     ('SDL2-2.32.10.tar.gz', 'https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz', '5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165', 'SDL2-2.32.10'),
     ('MoltenVK-all.tar', 'https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-all.tar', '562a15a29bc358446a56a4091c5f7e08f604184187c1d34f712148b61ef17276', 'MoltenVK'),
+    ('SPIRV-Cross-vulkan-sdk-1.4.309.0.tar.gz', 'https://github.com/KhronosGroup/SPIRV-Cross/archive/refs/tags/vulkan-sdk-1.4.309.0.tar.gz', 'cf4f12a767d63f63024e61750e372ffdc95567513b99ed9be6f21f474b328ddd', 'SPIRV-Cross-vulkan-sdk-1.4.309.0'),
     ('libvpx-1.15.2.tar.gz', 'https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.2.tar.gz', '26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa', 'libvpx-1.15.2'),
 ]
+
+def space_free(path):
+    """libvpx's configure and makefiles break on paths with spaces; reach them through a symlink."""
+    if ' ' not in str(path):
+        return path
+    link = pathlib.Path(tempfile.gettempdir()) / ('gzdoom-apple-' + hashlib.sha256(str(ROOT).encode()).hexdigest()[:12])
+    if not link.is_symlink():
+        link.symlink_to(ROOT, target_is_directory=True)
+    return link / path.relative_to(ROOT)
 
 def run(args, cwd=ROOT, env=None):
     print('+', ' '.join(str(a) for a in args), flush=True)
@@ -92,11 +103,11 @@ def build(target, args):
         env = dict(os.environ, CC='xcrun clang', CXX='xcrun clang++', AR='ar', AS='xcrun clang', LD='xcrun clang')
         flags = f'-target {triple} -isysroot {sdkpath}'
         env['LDFLAGS'] = flags
-        run([DEPS / 'libvpx-1.15.2/configure', '--target=generic-gnu', f'--prefix={prefix}', '--disable-examples', '--disable-tools', '--disable-docs', '--disable-unit-tests', '--disable-vp8-encoder', '--disable-vp9-encoder', '--disable-shared', '--enable-static', f'--extra-cflags={flags}', f'--extra-cxxflags={flags}'], cwd=vpxbuild, env=env)
-        run(['make', '-j', args.jobs], cwd=vpxbuild, env=env)
-        run(['make', 'install'], cwd=vpxbuild, env=env)
+        run([space_free(DEPS) / 'libvpx-1.15.2/configure', '--target=generic-gnu', f'--prefix={space_free(prefix)}', '--disable-examples', '--disable-tools', '--disable-docs', '--disable-unit-tests', '--disable-vp8-encoder', '--disable-vp9-encoder', '--disable-shared', '--enable-static', f'--extra-cflags={flags}', f'--extra-cxxflags={flags}'], cwd=space_free(vpxbuild), env=env)
+        run(['make', '-j', args.jobs], cwd=space_free(vpxbuild), env=env)
+        run(['make', 'install'], cwd=space_free(vpxbuild), env=env)
     engine = base / 'engine'
-    options = common + ['-DGZDOOM_BUNDLE_TEST_WADS=' + ('ON' if args.test_wads else 'OFF'), f'-DCMAKE_PREFIX_PATH={prefix}', f'-DSDL2_DIR={prefix}/lib/cmake/SDL2', f'-DSDL2_INCLUDE_DIR={prefix}/include;{prefix}/include/SDL2', f'-DGZDOOM_OPENAL_SOURCE={DEPS}/openal-soft-1.25.2', '-DDYN_OPENAL=OFF', f'-DVPX_INCLUDE_DIR={prefix}/include', f'-DVPX_LIBRARIES={prefix}/lib/libvpx.a', f'-DGZDOOM_MOLTENVK_ROOT={DEPS}/MoltenVK', '-DPK3_QUIET_ZIPDIR=ON', '-DBUILD_SHARED_LIBS=OFF', '-DFORCE_INTERNAL_ZMUSIC=ON', '-DZMUSIC_WITH_FLUIDSYNTH=OFF', '-DFORCE_INTERNAL_BZIP2=ON', '-DVULKAN_USE_XLIB=OFF']
+    options = common + ['-DGZDOOM_BUNDLE_TEST_WADS=' + ('ON' if args.test_wads else 'OFF'), f'-DCMAKE_PREFIX_PATH={prefix}', f'-DSDL2_DIR={prefix}/lib/cmake/SDL2', f'-DSDL2_INCLUDE_DIR={prefix}/include;{prefix}/include/SDL2', f'-DGZDOOM_OPENAL_SOURCE={DEPS}/openal-soft-1.25.2', f'-DGZDOOM_SPIRV_CROSS_SOURCE={DEPS}/SPIRV-Cross-vulkan-sdk-1.4.309.0', '-DDYN_OPENAL=OFF', f'-DVPX_INCLUDE_DIR={prefix}/include', f'-DVPX_LIBRARIES={prefix}/lib/libvpx.a', f'-DGZDOOM_MOLTENVK_ROOT={DEPS}/MoltenVK', '-DPK3_QUIET_ZIPDIR=ON', '-DBUILD_SHARED_LIBS=OFF', '-DFORCE_INTERNAL_ZMUSIC=ON', '-DZMUSIC_WITH_FLUIDSYNTH=OFF', '-DFORCE_INTERNAL_BZIP2=ON', '-DVULKAN_USE_XLIB=OFF']
     if mobile:
         host = ROOT / 'build-ios/host-tools'
         configure(ROOT / 'ios/host-tools', host, [])
@@ -125,16 +136,16 @@ def build_watch(target, args):
         env = dict(os.environ, CC='xcrun clang', CXX='xcrun clang++', AR='ar', AS='xcrun clang', LD='xcrun clang')
         flags = f'-target {triple} -isysroot {sdkpath}'
         env['LDFLAGS'] = flags
-        run([DEPS / 'libvpx-1.15.2/configure', '--target=generic-gnu', f'--prefix={prefix}', '--disable-examples', '--disable-tools', '--disable-docs', '--disable-unit-tests', '--disable-vp8-encoder', '--disable-vp9-encoder', '--disable-shared', '--enable-static', f'--extra-cflags={flags}', f'--extra-cxxflags={flags}'], cwd=vpxbuild, env=env)
-        run(['make', '-j', args.jobs], cwd=vpxbuild, env=env)
-        run(['make', 'install'], cwd=vpxbuild, env=env)
+        run([space_free(DEPS) / 'libvpx-1.15.2/configure', '--target=generic-gnu', f'--prefix={space_free(prefix)}', '--disable-examples', '--disable-tools', '--disable-docs', '--disable-unit-tests', '--disable-vp8-encoder', '--disable-vp9-encoder', '--disable-shared', '--enable-static', f'--extra-cflags={flags}', f'--extra-cxxflags={flags}'], cwd=space_free(vpxbuild), env=env)
+        run(['make', '-j', args.jobs], cwd=space_free(vpxbuild), env=env)
+        run(['make', 'install'], cwd=space_free(vpxbuild), env=env)
     host = ROOT / 'build-ios/host-tools'
     configure(ROOT / 'ios/host-tools', host, [])
     run(['cmake', '--build', host, '-j', args.jobs])
     configure(ROOT, base / 'engine', [
         '-DCMAKE_SYSTEM_NAME=watchOS', f'-DCMAKE_OSX_SYSROOT={sdk}',
         f'-DCMAKE_OSX_ARCHITECTURES={arch}', f'-DCMAKE_OSX_DEPLOYMENT_TARGET={deploy}',
-        f'-DCMAKE_Swift_FLAGS=-target {triple} -module-cache-path {base}/swift-module-cache',
+        f'-DCMAKE_Swift_FLAGS=-target {triple} -module-cache-path {space_free(base)}/swift-module-cache',
         f'-DVPX_INCLUDE_DIR={prefix}/include', f'-DVPX_LIBRARIES={prefix}/lib/libvpx.a',
         f'-DIMPORT_EXECUTABLES={host}/ImportExecutables.cmake',
         '-DPK3_QUIET_ZIPDIR=ON', '-DZMUSIC_WITH_FLUIDSYNTH=OFF',

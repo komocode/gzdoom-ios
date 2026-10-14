@@ -82,15 +82,19 @@ public:
 	void AddVkPPShader(VkPPShader* shader);
 	void RemoveVkPPShader(VkPPShader* shader);
 
+	// GLSL source assembly, shared with the Metal backend (which compiles the same
+	// source to SPIR-V and translates it to MSL).
+	static FString BuildVertexSource(const char *vert_lump, const char *defines, bool noClipDistance, bool vulkan12);
+	static FString BuildFragmentSource(const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass, bool noClipDistance, bool raytracing, bool vulkan12);
+	static FString LoadPublicShaderLump(const char *lumpname);
+	static FString LoadPrivateShaderLump(const char *lumpname);
+	static ShaderIncludeResult OnInclude(FString headerName, FString includerName, size_t depth);
+
 private:
 	std::unique_ptr<VulkanShader> LoadVertShader(FString shadername, const char *vert_lump, const char *defines);
 	std::unique_ptr<VulkanShader> LoadFragShader(FString shadername, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass);
 
-	FString GetTargetGlslVersion();
-	FString LoadPublicShaderLump(const char *lumpname);
-	FString LoadPrivateShaderLump(const char *lumpname);
-
-	static ShaderIncludeResult OnInclude(FString headerName, FString includerName, size_t depth);
+	static FString GetTargetGlslVersion(bool vulkan12);
 
 	VulkanRenderDevice* fb = nullptr;
 

@@ -101,7 +101,14 @@ CUSTOM_CVAR(Int, vid_maxfps, 500, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 	}
 }
 
-CUSTOM_CVAR(Int, vid_preferbackend, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL)
+// Apple builds default to the native Metal renderer; Vulkan (through MoltenVK) stays available.
+#if defined(__APPLE__) && defined(HAVE_METAL)
+static const int defaultBackend = 4;
+#else
+static const int defaultBackend = 1;
+#endif
+
+CUSTOM_CVAR(Int, vid_preferbackend, defaultBackend, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL)
 {
 	// [SP] This may seem pointless - but I don't want to implement live switching just
 	// yet - I'm pretty sure it's going to require a lot of reinits and destructions to
@@ -122,6 +129,11 @@ CUSTOM_CVAR(Int, vid_preferbackend, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_N
 		Printf("Selecting Vulkan backend...\n");
 		break;
 #endif
+#ifdef HAVE_METAL
+	case 4:
+		Printf("Selecting Metal backend...\n");
+		break;
+#endif
 	default:
 		Printf("Selecting OpenGL backend...\n");
 	}
@@ -131,10 +143,17 @@ CUSTOM_CVAR(Int, vid_preferbackend, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_N
 
 int V_GetBackend()
 {
-#ifdef GZDOOM_IOS
-	return 1; // UIKit devices always use the Metal-backed Vulkan renderer.
-#endif
 	int v = vid_preferbackend;
+#ifdef GZDOOM_IOS
+	// UIKit devices use Vulkan through MoltenVK, or the native Metal renderer.
+#ifdef HAVE_METAL
+	if (v == 4) return 4;
+#endif
+	return 1;
+#endif
+#ifdef HAVE_METAL
+	if (v == 4) return 4;
+#endif
 	if (v == 3) vid_preferbackend = v = 2;
 	else if (v < 0 || v > 3) v = 0;
 	return v;

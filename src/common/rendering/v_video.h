@@ -142,6 +142,8 @@ public:
 	const char *vendorstring;					// We have to account for some issues with particular vendors.
 	FSkyVertexBuffer *mSkyData = nullptr;		// the sky vertex buffer
 	FFlatVertexBuffer *mVertexData = nullptr;	// Global vertex data
+	IVertexBuffer *mFXParticleVertices = nullptr;	// visual-only GPU particles (hw_gpuparticles.cpp)
+	IIndexBuffer *mFXParticleIndices = nullptr;
 	HWViewpointBuffer *mViewpoints = nullptr;	// Viewpoint render data.
 	FLightBuffer *mLights = nullptr;			// Dynamic lights
 	BoneBuffer* mBones = nullptr;				// Model bones
@@ -236,6 +238,13 @@ public:
 
 	virtual void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t>& LMTextureData) {}
 	virtual void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData) {}
+
+	// Temporal upscaling by the platform (MetalFX on the Metal renderer). The
+	// inputs are render-resolution postprocess textures: HDR color, device depth
+	// and motion (previous minus current position, in UV units). jitter is this
+	// frame's projection offset in input pixels.
+	virtual bool SupportsPlatformUpscaler() { return false; }
+	virtual void PlatformTemporalUpscale(class PPTexture *color, class PPTexture *depth, class PPTexture *motion, class PPTexture *output, float jitterX, float jitterY, bool reset) {}
 
     // Interface to hardware rendering resources
 	virtual IVertexBuffer *CreateVertexBuffer() { return nullptr; }

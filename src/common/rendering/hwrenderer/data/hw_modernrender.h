@@ -42,10 +42,13 @@ EXTERN_CVAR(Float, r_ssgi_strength)
 EXTERN_CVAR(Int, r_volumetric)
 EXTERN_CVAR(Float, r_volumetric_strength)
 EXTERN_CVAR(Bool, r_taa)
+EXTERN_CVAR(Float, r_upscale)
+EXTERN_CVAR(Bool, r_upscale_metalfx)
 EXTERN_CVAR(Bool, r_bloom_modern)
 EXTERN_CVAR(Float, r_sharpen)
 EXTERN_CVAR(Float, r_vignette)
 EXTERN_CVAR(Float, r_grain)
+EXTERN_CVAR(Int, r_gpuparticles)
 
 int R_ModernFeatureMask(bool gbuffer);
 void R_ApplyRenderPreset(int preset);

@@ -138,6 +138,8 @@ VulkanRenderDevice::~VulkanRenderDevice()
 
 	delete mVertexData;
 	delete mSkyData;
+	delete mFXParticleVertices;
+	delete mFXParticleIndices;
 	delete mViewpoints;
 	delete mLights;
 	delete mBones;

@@ -55,10 +55,13 @@ FEATURE_CVAR(Float, r_ssgi_strength, 1.f, "strength of screen-space indirect lig
 FEATURE_CVAR(Int, r_volumetric, 0, "volumetric light scattering: 0 off, 1 half resolution, 2 full resolution")
 FEATURE_CVAR(Float, r_volumetric_strength, 1.f, "strength of volumetric light scattering")
 FEATURE_CVAR(Bool, r_taa, false, "temporal anti-aliasing with subpixel jitter and reprojected history")
+FEATURE_CVAR(Float, r_upscale, 1.f, "temporal upscaling with TAA: 3D render scale from 0.5 to 1 (1 = off); the HUD stays at full resolution")
+FEATURE_CVAR(Bool, r_upscale_metalfx, true, "use MetalFX for temporal upscaling when the Metal renderer provides it")
 FEATURE_CVAR(Bool, r_bloom_modern, true, "use the energy-conserving progressive bloom")
 FEATURE_CVAR(Float, r_sharpen, 0.f, "contrast-adaptive sharpening amount (0-1)")
 FEATURE_CVAR(Float, r_vignette, 0.f, "vignette strength (0-1)")
 FEATURE_CVAR(Float, r_grain, 0.f, "film grain / dither strength (0-1)")
+FEATURE_CVAR(Int, r_gpuparticles, 0, "visual-only GPU particles for impacts, blood and explosions: 0 off, 1 normal, 2 dense")
 
 int R_ModernFeatureMask(bool gbuffer)
 {
@@ -75,7 +78,7 @@ int R_ModernFeatureMask(bool gbuffer)
 struct PresetValues
 {
 	bool gi, autonormal, specular, parallax, bloom, taa;
-	int ssao, ssr, ssgi, volumetric, tonemap, shadowfilter, shadowquality, fxaa, spriteshadow;
+	int ssao, ssr, ssgi, volumetric, tonemap, shadowfilter, shadowquality, fxaa, spriteshadow, particles;
 	float sharpen, vignette, grain;
 };
 
@@ -83,12 +86,13 @@ static const PresetValues presets[] =
 {
 	// Sprite shadows (ss) ground actors as contact shadows: 1 default, 2 always.
 	// TAA replaces FXAA from high up; a little more sharpening restores texel detail.
-	//  gi     anorm  spec   pom    bloom  taa    ssao ssr gi vol tm sf  sq    fxaa ss sharpen vig    grain
-	{ false, false, false, false, false, false, 0,   0,  0, 0,  0, 1, 128,  0,   1, 0.f,    0.f,   0.f  }, // classic
-	{ true,  true,  true,  false, true,  false, 0,   0,  0, 0,  6, 1, 128,  0,   1, 0.25f,  0.f,   0.2f }, // low
-	{ true,  true,  true,  false, true,  false, 1,   1,  0, 1,  6, 1, 256,  0,   2, 0.25f,  0.15f, 0.2f }, // medium
-	{ true,  true,  true,  true,  true,  true,  2,   2,  0, 1,  6, 2, 512,  0,   2, 0.4f,   0.2f,  0.25f }, // high
-	{ true,  true,  true,  true,  true,  true,  3,   2,  1, 2,  6, 3, 1024, 0,   2, 0.4f,   0.2f,  0.25f }, // ultra
+	// Particles (pt): 1 normal, 2 dense.
+	//  gi     anorm  spec   pom    bloom  taa    ssao ssr gi vol tm sf  sq    fxaa ss pt sharpen vig    grain
+	{ false, false, false, false, false, false, 0,   0,  0, 0,  0, 1, 128,  0,   1, 0, 0.f,    0.f,   0.f  }, // classic
+	{ true,  true,  true,  false, true,  false, 0,   0,  0, 0,  6, 1, 128,  0,   1, 1, 0.25f,  0.f,   0.2f }, // low
+	{ true,  true,  true,  false, true,  false, 1,   1,  0, 1,  6, 1, 256,  0,   2, 1, 0.25f,  0.15f, 0.2f }, // medium
+	{ true,  true,  true,  true,  true,  true,  2,   2,  0, 1,  6, 2, 512,  0,   2, 2, 0.4f,   0.2f,  0.25f }, // high
+	{ true,  true,  true,  true,  true,  true,  3,   2,  1, 2,  6, 3, 1024, 0,   2, 2, 0.4f,   0.2f,  0.25f }, // ultra
 };
 
 void R_ApplyRenderPreset(int preset)
@@ -108,6 +112,7 @@ void R_ApplyRenderPreset(int preset)
 	r_sharpen = p.sharpen;
 	r_vignette = p.vignette;
 	r_grain = p.grain;
+	r_gpuparticles = p.particles;
 	gl_bloom = p.bloom;
 	gl_ssao = p.ssao;
 	gl_tonemap = p.tonemap;
@@ -130,9 +135,9 @@ void R_SetAutoPreset(int preset)
 CCMD(r_presets)
 {
 	Printf("r_preset 0: classic GZDoom presentation\n");
-	Printf("r_preset 1: low - baked GI, texture relief, specular, filmic tonemap, bloom\n");
+	Printf("r_preset 1: low - baked GI, texture relief, specular, filmic tonemap, bloom, GPU particles\n");
 	Printf("r_preset 2: medium - adds ambient occlusion, liquid reflections, half-res volumetrics\n");
-	Printf("r_preset 3: high - adds parallax, glossy floor reflections, soft shadows, TAA\n");
+	Printf("r_preset 3: high - adds parallax, glossy floor reflections, soft shadows, TAA, dense particles\n");
 	Printf("r_preset 4: ultra - adds screen-space GI, full-res volumetrics, highest AO and shadow quality\n");
 	Printf("Last applied: %d%s\n", *r_preset, r_preset_auto ? " (chosen for this device)" : "");
 }

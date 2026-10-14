@@ -11,13 +11,15 @@ int main()
     assert(a12.ssao == 0 && !a12.bloom);
     auto a15 = Select({8, 4*GiB, 60, false}, 0, false);
     assert(a15.fps == 60 && a15.msaa == 2 && a15.maxRenderHeight == 1080);
+    // High and ultra use TAA (which needs MSAA off) and upscale to a sharper output.
     auto m1 = Select({7, 8*GiB, 120, false}, 0, false);
-    assert(m1.fps == 120 && m1.ssao == 1 && m1.msaa == 2);
+    assert(m1.fps == 120 && m1.ssao == 1 && m1.msaa == 1 && m1.outputScale > 1.f);
     auto m4 = Select({9, 16*GiB, 120, false}, 0, false);
-    assert(m4.fps == 120 && m4.msaa == 4 && m4.maxRenderHeight == 1600);
+    assert(m4.fps == 120 && m4.msaa == 1 && m4.maxRenderHeight == 1600);
     assert(Select({8, 37*GiB/10, 60, false}, 0, false).maxRenderHeight == 1080);
     assert(Select({7, 55*GiB/10, 120, false}, 0, false).fps == 120);
-    assert(Select({9, 74*GiB/10, 120, false}, 0, false).msaa == 4);
+    assert(Select({9, 74*GiB/10, 120, false}, 0, false).preset == 4);
+    assert(a15.preset == 2 && a15.outputScale == 1.f);
     auto low = Select({9, 16*GiB, 120, false}, 0, true);
     assert(low.fps == 60 && low.msaa == 1 && low.ssao == 0 && !low.bloom);
     auto hot = Select({9, 16*GiB, 120, false}, 2, false);
@@ -42,5 +44,6 @@ int main()
                     assert(s.fps >= 35 && s.fps <= hz);
                     assert(s.maxRenderHeight >= 720 && s.maxRenderHeight <= 1600);
                     assert(s.msaa == 1 || s.msaa == 2 || s.msaa == 4);
+                    assert(s.preset < 3 ? s.outputScale == 1.f : s.msaa == 1);
                 }
 }

@@ -240,7 +240,6 @@ extern "C" int SDL_main(int argc, char **argv)
         std::vector<std::string> arguments;
         for (int i = 0; i < argc; ++i) arguments.emplace_back(argv[i]);
         if (selectedGame) { arguments.emplace_back("-iwad"); arguments.emplace_back(selectedGame.UTF8String); }
-        arguments.emplace_back("+vid_preferbackend"); arguments.emplace_back("1");
         arguments.emplace_back("+queryiwad"); arguments.emplace_back("false");
         arguments.emplace_back("+freelook"); arguments.emplace_back("true");
         arguments.emplace_back("+vid_fullscreen"); arguments.emplace_back("true");

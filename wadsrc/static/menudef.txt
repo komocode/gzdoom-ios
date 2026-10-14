@@ -1054,6 +1054,7 @@ OptionValue PreferBackend
 	0, "$OPTVAL_OPENGL"
 	1, "$OPTVAL_VULKAN"
 	2, "$OPTVAL_OPENGLES"
+	4, "Metal"
 }
 
 OptionMenu "VideoOptions" protected
@@ -3003,6 +3004,13 @@ OptionValue "VolumetricModes"
 	2, "Full resolution"
 }
 
+OptionValue "ParticleModes"
+{
+	0, "$OPTVAL_OFF"
+	1, "Normal"
+	2, "Dense"
+}
+
 OptionValue "GIQuality"
 {
 	0, "Fast"
@@ -3026,6 +3034,7 @@ OptionMenu "ModernRenderMenu" protected
 	Option "Volumetric light",				r_volumetric,			"VolumetricModes"
 	Slider "Volumetric strength",			r_volumetric_strength,	0.0, 3.0, 0.1, 1
 	Option "Dynamic light shadows",			gl_light_shadowmap,		"OnOff"
+	Option "Ray traced shadows (Metal, restart)",	vk_raytrace,		"OnOff"
 	StaticText " "
 	StaticText "Surfaces", 1
 	Option "Texture relief",				r_autonormal,			"OnOff"
@@ -3036,10 +3045,14 @@ OptionMenu "ModernRenderMenu" protected
 	Option "Screen-space reflections",		r_ssr,					"SSRModes"
 	Slider "Reflection strength",			r_ssr_strength,			0.0, 2.0, 0.1, 1
 	StaticText " "
+	StaticText "Effects", 1
+	Option "Impact and explosion particles",	r_gpuparticles,			"ParticleModes"
+	StaticText " "
 	StaticText "Camera", 1
 	Option "$GLPREFMNU_TONEMAP",			gl_tonemap,				"TonemapModes"
 	Option "Progressive bloom",				r_bloom_modern,			"OnOff"
 	Option "Temporal anti-aliasing",		r_taa,					"OnOff"
+	Slider "Temporal upscaling (3D scale)",	r_upscale,				0.5, 1.0, 0.05, 2
 	Slider "Sharpen",						r_sharpen,				0.0, 1.0, 0.05, 2
 	Slider "Vignette",						r_vignette,				0.0, 1.0, 0.05, 2
 	Slider "Film grain",					r_grain,				0.0, 1.0, 0.05, 2

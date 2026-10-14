@@ -141,9 +141,25 @@ void VkRenderBuffers::CreatePipeline(int width, int height)
 			.DebugName("VkRenderBuffers.PipelineView")
 			.Create(fb->device.get());
 
-		barrier.AddImage(&PipelineImage[i], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+		barrier.AddImage(&PipelineImage[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true);
 	}
 	barrier.Execute(fb->GetCommands()->GetDrawCommands());
+
+	// New images can hold stale memory. NaNs there would survive every blended
+	// draw (NaN * 0 is NaN), e.g. 2D screens that never render a scene first.
+	VkImageSubresourceRange range = {};
+	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	range.layerCount = 1;
+	range.levelCount = 1;
+	VkClearColorValue value = {};
+	value.float32[3] = 1.0f;
+	VkImageTransition attachments;
+	for (int i = 0; i < NumPipelineImages; i++)
+	{
+		fb->GetCommands()->GetDrawCommands()->clearColorImage(PipelineImage[i].Image->image, PipelineImage[i].Layout, &value, 1, &range);
+		attachments.AddImage(&PipelineImage[i], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false);
+	}
+	attachments.Execute(fb->GetCommands()->GetDrawCommands());
 }
 
 void VkRenderBuffers::CreateScene(int width, int height, VkSampleCountFlagBits samples)

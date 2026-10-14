@@ -5,12 +5,17 @@ class DLighting : public DSectorEffect
 	DECLARE_CLASS(DLighting, DSectorEffect)
 public:
 	static const int DEFAULT_STAT = STAT_LIGHT;
+
+	// The level baked lighting should use for a sector this effect varies over
+	// time, or -1 to use the current light level.
+	virtual int SteadyLightLevel() const { return -1; }
 };
 
 class DFireFlicker : public DLighting
 {
 	DECLARE_CLASS(DFireFlicker, DLighting)
 public:
+	int SteadyLightLevel() const override { return (m_MinLight + m_MaxLight) / 2; }
 	void Construct(sector_t *sector);
 	void Construct(sector_t *sector, int upper, int lower);
 	void		Serialize(FSerializer &arc);
@@ -25,6 +30,7 @@ class DFlicker : public DLighting
 {
 	DECLARE_CLASS(DFlicker, DLighting)
 public:
+	int SteadyLightLevel() const override { return (m_MinLight + m_MaxLight) / 2; }
 	void Construct(sector_t *sector, int upper, int lower);
 	void		Serialize(FSerializer &arc);
 	void		Tick();
@@ -38,6 +44,7 @@ class DLightFlash : public DLighting
 {
 	DECLARE_CLASS(DLightFlash, DLighting)
 public:
+	int SteadyLightLevel() const override { return (m_MinLight + m_MaxLight) / 2; }
 	void Construct(sector_t *sector);
 	void Construct(sector_t *sector, int min, int max);
 	void		Serialize(FSerializer &arc);
@@ -54,6 +61,7 @@ class DStrobe : public DLighting
 {
 	DECLARE_CLASS(DStrobe, DLighting)
 public:
+	int SteadyLightLevel() const override { return (m_MinLight + m_MaxLight) / 2; }
 	void Construct(sector_t *sector, int utics, int ltics, bool inSync);
 	void Construct(sector_t *sector, int upper, int lower, int utics, int ltics);
 	void		Serialize(FSerializer &arc);
@@ -70,6 +78,7 @@ class DGlow : public DLighting
 {
 	DECLARE_CLASS(DGlow, DLighting)
 public:
+	int SteadyLightLevel() const override { return (m_MinLight + m_MaxLight) / 2; }
 	void Construct(sector_t *sector);
 	void		Serialize(FSerializer &arc);
 	void		Tick();
@@ -84,6 +93,7 @@ class DGlow2 : public DLighting
 {
 	DECLARE_CLASS(DGlow2, DLighting)
 public:
+	int SteadyLightLevel() const override { return m_End; }
 	void Construct(sector_t *sector, int start, int end, int tics, bool oneshot);
 	void		Serialize(FSerializer &arc);
 	void		Tick();

@@ -763,11 +763,14 @@ vec2 ParallaxTexCoord(vec2 st)
 	vec3 n = normalize(vWorldNormal.xyz);
 	mat3 tbn = cotangent_frame(n, pixelpos.xyz, st);
 	vec3 viewTS = normalize(transpose(tbn) * (toCamera / dist));
-	if (viewTS.z <= 0.05) return st;
+	// Fade out at grazing angles, where the march would smear the texture.
+	fade *= smoothstep(0.08, 0.35, viewTS.z);
+	if (fade <= 0.0) return st;
 
-	// About four texels of depth regardless of texture size.
+	// About four texels of depth regardless of texture size. The bias in the
+	// divisor limits the offset at shallow angles.
 	vec2 texSize = vec2(textureSize(tex, 0));
-	vec2 maxOffset = viewTS.xy / viewTS.z * (4.0 / texSize) * fade;
+	vec2 maxOffset = viewTS.xy / (viewTS.z + 0.4) * (4.0 / texSize) * fade;
 	const int steps = 10;
 	float layer = 1.0 / float(steps);
 	vec2 delta = maxOffset * layer;
@@ -1034,11 +1037,76 @@ vec3 AmbientOcclusionColor()
 //
 //===========================================================================
 
+// GPU particle shapes (hw_gpuparticles.cpp). vTexCoord = corner (-1..1), seed, shape.
+float ParticleHash(vec2 p)
+{
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float ParticleNoise(vec2 p)
+{
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(ParticleHash(i), ParticleHash(i + vec2(1.0, 0.0)), f.x),
+		mix(ParticleHash(i + vec2(0.0, 1.0)), ParticleHash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+vec4 ParticleColor()
+{
+	vec2 c = vTexCoord.xy;
+	float seed = vTexCoord.z;
+	float shape = vTexCoord.w;
+	float r2 = dot(c, c);
+	float a;
+	vec3 rgb = vColor.rgb;
+	if (shape < 0.5) // glow: hot core, soft halo
+	{
+		a = exp(-4.0 * r2) * (1.0 - smoothstep(0.7, 1.0, r2));
+		rgb *= 1.0 + 1.5 * exp(-16.0 * r2);
+	}
+	else if (shape < 1.5) // smoke: billowing edge, lit from above
+	{
+		vec2 p = c * 2.2 + seed * 37.0;
+		float n = ParticleNoise(p) * 0.6 + ParticleNoise(p * 2.3 + 11.0) * 0.4;
+		a = smoothstep(1.0, 0.25, r2 + (n - 0.5) * 0.7);
+		rgb *= 0.8 + 0.35 * (c.y * 0.5 + 0.5) + 0.15 * (n - 0.5);
+	}
+	else if (shape < 2.5) // chunk: irregular hard-edged polygon with a shaded face
+	{
+		float ang = atan(c.y, c.x);
+		float edge = 0.55 + 0.35 * ParticleNoise(vec2(ang * 1.3 + seed * 50.0, seed * 7.0));
+		a = 1.0 - smoothstep(edge - 0.08, edge, sqrt(r2));
+		rgb *= 0.75 + 0.45 * clamp(0.5 + 0.5 * dot(c, vec2(-0.6, 0.8)), 0.0, 1.0);
+	}
+	else // droplet: dense with a specular glint
+	{
+		a = 1.0 - smoothstep(0.55, 1.0, r2);
+		rgb += vec3(0.5) * exp(-30.0 * dot(c - vec2(-0.3, 0.3), c - vec2(-0.3, 0.3))) * vColor.a;
+	}
+	// Soft intersection with the surface the particle came from and the floor.
+	float soft = glowdist.y;
+	a *= clamp((pixelpos.y - glowdist.x) / soft, 0.0, 1.0);
+	a *= clamp((dot(vWorldNormal.xyz, pixelpos.xyz) - vWorldNormal.w) / soft, 0.0, 1.0);
+	return vec4(rgb, a * vColor.a);
+}
+
 void main()
 {
 #ifdef NO_CLIPDISTANCE_SUPPORT
 	if (ClipDistanceA.x < 0 || ClipDistanceA.y < 0 || ClipDistanceA.z < 0 || ClipDistanceA.w < 0 || ClipDistanceB.x < 0) discard;
 #endif
+
+	if (uMaterialParams.w > 0.0)
+	{
+		FragColor = ParticleColor();
+		if (FragColor.a <= 0.002) discard;
+#ifdef GBUFFER_PASS
+		FragFog = vec4(AmbientOcclusionColor(), 1.0);
+		FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, 1.0);
+#endif
+		return;
+	}
 
 #ifndef LEGACY_USER_SHADER
 	Material material;

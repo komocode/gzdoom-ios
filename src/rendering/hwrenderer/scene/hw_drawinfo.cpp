@@ -26,6 +26,7 @@
 */
 
 #include "hw_irradiance.h"
+#include "hw_gpuparticles.h"
 #include "hw_modernrender.h"
 #include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "a_sharedglobal.h"
@@ -1062,6 +1063,7 @@ void HWDrawInfo::DrawScene(int drawmode)
 	portalState.EndFrame(this, RenderState);
 	recursion--;
 	RenderTranslucent(RenderState);
+	if (drawmode == DM_MAINVIEW) FX_DrawParticles(this, RenderState);
 }
 
 

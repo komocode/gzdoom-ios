@@ -380,9 +380,9 @@ static const char *shaderBindings = R"(
 	vec4 noise4(vec4) { return vec4(0); }
 )";
 
-std::unique_ptr<VulkanShader> VkShaderManager::LoadVertShader(FString shadername, const char *vert_lump, const char *defines)
+FString VkShaderManager::BuildVertexSource(const char *vert_lump, const char *defines, bool noClipDistance, bool vulkan12)
 {
-	FString code = GetTargetGlslVersion();
+	FString code = GetTargetGlslVersion(vulkan12);
 	code << "#extension GL_GOOGLE_include_directive : enable\n";
 	code << defines;
 	code << "\n#define MAX_STREAM_DATA " << std::to_string(MAX_STREAM_DATA).c_str() << "\n";
@@ -390,9 +390,15 @@ std::unique_ptr<VulkanShader> VkShaderManager::LoadVertShader(FString shadername
 	code << "#define NPOT_EMULATION\n";
 #endif
 	code << shaderBindings;
-	if (!fb->device->EnabledFeatures.Features.shaderClipDistance) code << "#define NO_CLIPDISTANCE_SUPPORT\n";
+	if (noClipDistance) code << "#define NO_CLIPDISTANCE_SUPPORT\n";
 	code << "#line 1\n";
 	code << LoadPrivateShaderLump(vert_lump).GetChars() << "\n";
+	return code;
+}
+
+std::unique_ptr<VulkanShader> VkShaderManager::LoadVertShader(FString shadername, const char *vert_lump, const char *defines)
+{
+	FString code = BuildVertexSource(vert_lump, defines, !fb->device->EnabledFeatures.Features.shaderClipDistance, fb->device->Instance->ApiVersion == VK_API_VERSION_1_2);
 
 	return ShaderBuilder()
 		.Type(ShaderType::Vertex)
@@ -403,11 +409,11 @@ std::unique_ptr<VulkanShader> VkShaderManager::LoadVertShader(FString shadername
 		.Create(shadername.GetChars(), fb->device.get());
 }
 
-std::unique_ptr<VulkanShader> VkShaderManager::LoadFragShader(FString shadername, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass)
+FString VkShaderManager::BuildFragmentSource(const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass, bool noClipDistance, bool raytracing, bool vulkan12)
 {
-	FString code = GetTargetGlslVersion();
+	FString code = GetTargetGlslVersion(vulkan12);
 	code << "#extension GL_GOOGLE_include_directive : enable\n";
-	if (fb->RaytracingEnabled())
+	if (raytracing)
 		code << "\n#define SUPPORTS_RAYTRACING\n";
 	code << defines;
 	code << "\n$placeholder$";	// here the code can later add more needed #defines.
@@ -418,7 +424,7 @@ std::unique_ptr<VulkanShader> VkShaderManager::LoadFragShader(FString shadername
 	code << shaderBindings;
 	FString placeholder = "\n";
 
-	if (!fb->device->EnabledFeatures.Features.shaderClipDistance) code << "#define NO_CLIPDISTANCE_SUPPORT\n";
+	if (noClipDistance) code << "#define NO_CLIPDISTANCE_SUPPORT\n";
 	if (!alphatest) code << "#define NO_ALPHATEST\n";
 	if (gbufferpass) code << "#define GBUFFER_PASS\n";
 
@@ -489,6 +495,13 @@ std::unique_ptr<VulkanShader> VkShaderManager::LoadFragShader(FString shadername
 		code << "\n#line 1\n";
 		code << LoadPrivateShaderLump(light_lump).GetChars();
 	}
+	return code;
+}
+
+std::unique_ptr<VulkanShader> VkShaderManager::LoadFragShader(FString shadername, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass)
+{
+	FString code = BuildFragmentSource(frag_lump, material_lump, light_lump, defines, alphatest, gbufferpass,
+		!fb->device->EnabledFeatures.Features.shaderClipDistance, fb->RaytracingEnabled(), fb->device->Instance->ApiVersion == VK_API_VERSION_1_2);
 
 	return ShaderBuilder()
 		.Type(ShaderType::Fragment)
@@ -499,9 +512,9 @@ std::unique_ptr<VulkanShader> VkShaderManager::LoadFragShader(FString shadername
 		.Create(shadername.GetChars(), fb->device.get());
 }
 
-FString VkShaderManager::GetTargetGlslVersion()
+FString VkShaderManager::GetTargetGlslVersion(bool vulkan12)
 {
-	if (fb->device->Instance->ApiVersion == VK_API_VERSION_1_2)
+	if (vulkan12)
 	{
 		return "#version 460\n#extension GL_EXT_ray_query : enable\n";
 	}

@@ -21,7 +21,20 @@ struct Settings
     int ssao;
     bool bloom;
     int preset; // r_preset: 1 low .. 4 ultra (see hw_modernrender.h)
+    // Output height relative to maxRenderHeight. Above 1, the 3D scene still
+    // renders at maxRenderHeight and TAA upscales it (r_upscale); the HUD and
+    // post-processing run at the higher output resolution.
+    float outputScale = 1.0f;
 };
+
+// High and ultra use TAA, which replaces MSAA and can upscale.
+inline void UseTemporalUpscaling(Settings &s)
+{
+    if (s.preset < 3) return;
+    s.msaa = 1;
+    s.outputScale = 1.25f;
+}
+
 inline Settings Select(const Capabilities &caps, int thermalState, bool lowPower)
 {
     constexpr uint64_t GiB = 1024ull * 1024 * 1024;
@@ -61,6 +74,7 @@ inline Settings Select(const Capabilities &caps, int thermalState, bool lowPower
         s.anisotropy = 4;
         s.preset = 1; // Baked GI and relief cost almost nothing per pixel.
     }
+    UseTemporalUpscaling(s);
     return s;
 }
 }

@@ -247,7 +247,7 @@ private:
 	ShaderBuilder* shaderBuilder = nullptr;
 };
 
-std::unique_ptr<VulkanShader> ShaderBuilder::Create(const char *shadername, VulkanDevice *device)
+std::vector<unsigned int> ShaderBuilder::CreateSpirv(const char *shadername, bool vulkan12)
 {
 	EShLanguage stage = (EShLanguage)this->stage;
 
@@ -265,7 +265,7 @@ std::unique_ptr<VulkanShader> ShaderBuilder::Create(const char *shadername, Vulk
 	glslang::TShader shader(stage);
 	shader.setStringsWithLengthsAndNames(sourcesC.data(), lengthsC.data(), namesC.data(), (int)sources.size());
 	shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
-    if (device->Instance->ApiVersion >= VK_API_VERSION_1_2)
+    if (vulkan12)
     {
         shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_2);
         shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_4);
@@ -305,6 +305,13 @@ std::unique_ptr<VulkanShader> ShaderBuilder::Create(const char *shadername, Vulk
 	std::vector<unsigned int> spirv;
 	spv::SpvBuildLogger logger;
 	glslang::GlslangToSpv(*intermediate, spirv, &logger, &spvOptions);
+
+	return spirv;
+}
+
+std::unique_ptr<VulkanShader> ShaderBuilder::Create(const char *shadername, VulkanDevice *device)
+{
+	std::vector<unsigned int> spirv = CreateSpirv(shadername, device->Instance->ApiVersion >= VK_API_VERSION_1_2);
 
 	VkShaderModuleCreateInfo createInfo = {};
 	createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;

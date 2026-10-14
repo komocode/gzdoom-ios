@@ -74,6 +74,11 @@
 #include <SDL2/SDL_vulkan.h>
 #endif // HAVE_VULKAN
 
+#ifdef HAVE_METAL
+#include <SDL2/SDL_metal.h>
+#include "metal/mtl_create.h"
+#endif
+
 // TYPES -------------------------------------------------------------------
 
 // PUBLIC FUNCTION PROTOTYPES ----------------------------------------------
@@ -122,6 +127,10 @@ namespace Priv
 {
 	SDL_Window *window;
 	bool vulkanEnabled;
+	bool metalEnabled;
+#ifdef HAVE_METAL
+	SDL_MetalView metalView;
+#endif
 	bool softpolyEnabled;
 	bool fullscreenSwitch;
 	int numberOfDisplays;
@@ -357,8 +366,21 @@ SDLVideo::SDLVideo ()
 		I_FatalError("Only SDL 2.0.6 or later is supported.");
 	}
 
+#ifdef HAVE_METAL
+	Priv::metalEnabled = V_GetBackend() == 4 && MetalIsSupported();
+	if (Priv::metalEnabled)
+	{
+		Priv::CreateWindow(SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN | (vid_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+		if (Priv::window == nullptr)
+			Priv::metalEnabled = false;
+	}
+#endif
+
 #ifdef HAVE_VULKAN
-	Priv::vulkanEnabled = V_GetBackend() == 1;
+	Priv::vulkanEnabled = !Priv::metalEnabled && V_GetBackend() == 1;
+#ifdef GZDOOM_IOS
+	if (!Priv::metalEnabled) Priv::vulkanEnabled = true;
+#endif
 
 	if (Priv::vulkanEnabled)
 	{
@@ -405,6 +427,22 @@ void SDLVideo::DumpAdapters()
 DFrameBuffer *SDLVideo::CreateFrameBuffer ()
 {
 	SystemBaseFrameBuffer *fb = nullptr;
+
+#ifdef HAVE_METAL
+	if (Priv::metalEnabled)
+	{
+		Priv::metalView = SDL_Metal_CreateView(Priv::window);
+		if (Priv::metalView)
+		{
+			fb = CreateMetalFrameBuffer(SDL_Metal_GetLayer(Priv::metalView), vid_fullscreen);
+#ifdef GZDOOM_IOS
+			IOS_AttachControls(Priv::window);
+#endif
+			return fb;
+		}
+		Priv::metalEnabled = false;
+	}
+#endif
 
 	// first try Vulkan, if that fails OpenGL
 #ifdef HAVE_VULKAN
@@ -478,7 +516,13 @@ int SystemBaseFrameBuffer::GetClientWidth()
 {
 	int width = 0;
 
-
+#ifdef HAVE_METAL
+	if (Priv::metalEnabled)
+	{
+		SDL_Metal_GetDrawableSize(Priv::window, &width, nullptr);
+		return width;
+	}
+#endif
 #ifdef HAVE_VULKAN
 	assert(Priv::vulkanEnabled);
 	SDL_Vulkan_GetDrawableSize(Priv::window, &width, nullptr);
@@ -491,6 +535,13 @@ int SystemBaseFrameBuffer::GetClientHeight()
 {
 	int height = 0;
 
+#ifdef HAVE_METAL
+	if (Priv::metalEnabled)
+	{
+		SDL_Metal_GetDrawableSize(Priv::window, nullptr, &height);
+		return height;
+	}
+#endif
 #ifdef HAVE_VULKAN
 	assert(Priv::vulkanEnabled);
 	SDL_Vulkan_GetDrawableSize(Priv::window, nullptr, &height);

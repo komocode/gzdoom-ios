@@ -61,6 +61,9 @@
 
 #ifdef HAVE_VULKAN
 #include "vulkan/system/vk_renderdevice.h"
+#ifdef HAVE_METAL
+#include "metal/mtl_create.h"
+#endif
 
 bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface);
 #endif
@@ -402,8 +405,19 @@ public:
 		const NSRect contentRect = [ms_window contentRectForFrameRect:[ms_window frame]];
 		SystemBaseFrameBuffer *fb = nullptr;
 
+#ifdef HAVE_METAL
+		if (V_GetBackend() == 4 && MetalIsSupported())
+		{
+			NSView* metalView = [[VulkanCocoaView alloc] initWithFrame:contentRect];
+			metalView.wantsLayer = YES;
+			metalView.layer.backgroundColor = NSColor.blackColor.CGColor;
+			[ms_window setContentView:metalView];
+			fb = CreateMetalFrameBuffer((__bridge void*)metalView.layer, vid_fullscreen);
+		}
+#endif
+
 #ifdef HAVE_VULKAN
-		if (ms_isVulkanEnabled)
+		if (fb == nullptr && ms_isVulkanEnabled)
 		{
 			NSView* vulkanView = [[VulkanCocoaView alloc] initWithFrame:contentRect];
 			vulkanView.wantsLayer = YES;
@@ -469,7 +483,8 @@ public:
 		else
 #endif
 
-		SetupOpenGLView(ms_window, OpenGLProfile::Core);
+		if (fb == nullptr)
+			SetupOpenGLView(ms_window, OpenGLProfile::Core);
 
 		if (fb == nullptr)
 		{

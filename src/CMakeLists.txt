@@ -927,6 +927,7 @@ set (PCH_SOURCES
 	rendering/hwrenderer/doom_aabbtree.cpp
 	rendering/hwrenderer/doom_levelmesh.cpp
 	rendering/hwrenderer/hw_irradiance.cpp
+	rendering/hwrenderer/hw_gpuparticles.cpp
 	rendering/hwrenderer/hw_models.cpp
 	rendering/hwrenderer/hw_precache.cpp
 	rendering/hwrenderer/scene/hw_lighting.cpp
@@ -1295,6 +1296,22 @@ set( GAME_SOURCES
 
 )
 
+if(HAVE_METAL AND HAVE_VULKAN)
+	# The Metal renderer shares the Vulkan backend's GLSL and glslang front end.
+	set(METAL_SOURCES
+		common/rendering/metal/mtl_renderdevice.mm
+		common/rendering/metal/mtl_renderstate.mm
+		common/rendering/metal/mtl_buffers.mm
+		common/rendering/metal/mtl_textures.mm
+		common/rendering/metal/mtl_shaders.mm
+		common/rendering/metal/mtl_postprocess.mm
+	)
+	set_source_files_properties(${METAL_SOURCES} PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+	list(APPEND GAME_SOURCES ${METAL_SOURCES})
+	add_definitions(-DHAVE_METAL)
+	list(APPEND PROJECT_LIBRARIES spirv-cross-msl)
+endif()
+
 if(GZDOOM_WATCH)
 	# The native Watch library replaces the desktop launcher and its widgets.
 	list(FILTER GAME_SOURCES EXCLUDE REGEX "^launcher/.*\\.cpp$")
@@ -1544,6 +1561,9 @@ elseif( APPLE )
 
 	if( HAVE_VULKAN )
 		set( LINK_FRAMEWORKS "${LINK_FRAMEWORKS} -framework QuartzCore" )
+	endif()
+	if( HAVE_METAL )
+		set( LINK_FRAMEWORKS "${LINK_FRAMEWORKS} -framework Metal -weak_framework MetalFX" )
 	endif()
 
 	set_target_properties(zdoom PROPERTIES

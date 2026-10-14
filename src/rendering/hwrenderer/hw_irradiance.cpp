@@ -17,6 +17,7 @@
 #include "actor.h"
 #include "v_text.h"
 #include "c_dispatch.h"
+#include "a_lights.h"
 
 #include <algorithm>
 #include <atomic>
@@ -414,7 +415,9 @@ Vec3 TextureAlbedo(FTextureID id)
 	auto found = albedoCache.find(id.GetIndex());
 	if (found != albedoCache.end()) return found->second;
 	Vec3 result = { 0.5f, 0.5f, 0.5f };
-	auto game = TexMan.GetGameTexture(id, true);
+	// The base texture, not the current animation frame, so the bake does not
+	// depend on when the scene is captured.
+	auto game = TexMan.GetGameTexture(id, false);
 	if (game && game->isValid() && game->GetTexture())
 	{
 		FBitmap bitmap = game->GetTexture()->GetBgraBitmap(nullptr);
@@ -439,8 +442,31 @@ Vec3 TextureAlbedo(FTextureID id)
 	return result;
 }
 
+// Flickering and glowing sectors bake at a steady level, so the result does not
+// depend on the tic the scene was captured on.
+std::unordered_map<const sector_t*, int> steadyLight;
+
+void CaptureSteadyLights(FLevelLocals *level)
+{
+	steadyLight.clear();
+	auto iterator = level->GetThinkerIterator<DLighting>(NAME_None, STAT_LIGHT);
+	while (DLighting *effect = iterator.Next())
+	{
+		int steady = effect->SteadyLightLevel();
+		if (steady >= 0 && effect->GetSector())
+			steadyLight[effect->GetSector()] = steady;
+	}
+}
+
+int SteadyOffset(const sector_t *sector)
+{
+	auto found = steadyLight.find(sector);
+	return found != steadyLight.end() ? found->second - sector->lightlevel : 0;
+}
+
 Vec3 LightColor(sector_t *sector, int level)
 {
+	level += SteadyOffset(sector);
 	PalEntry c = sector->Colormap.LightColor;
 	float l = std::clamp(level, 0, 255) / 255.f;
 	return { c.r / 255.f * l, c.g / 255.f * l, c.b / 255.f * l };
@@ -454,6 +480,7 @@ void CaptureAndStart(FLevelLocals *level)
 	auto bake = std::make_unique<BakeJob>();
 	bake->startTime = I_msTime();
 	albedoCache.clear();
+	CaptureSteadyLights(level);
 
 	// Sky radiance: the average sky color at a brightness similar to a well lit room.
 	Vec3 sky = { 0.6f, 0.65f, 0.75f };
@@ -545,7 +572,23 @@ void CaptureAndStart(FLevelLocals *level)
 		if (!light->IsActive() || light->IsSubtractive()) continue;
 		AActor *owner = light->target;
 		if (owner && (owner->flags & (MF_MISSILE | MF_SHOOTABLE | MF_COUNTKILL))) continue;
+		// Flickering and pulsing lights bake at their average size, so the result
+		// does not depend on the tic the scene was captured on.
 		float radius = light->GetRadius();
+		int intensity = light->GetIntensity(), secondary = light->GetSecondaryIntensity();
+		switch (light->lighttype)
+		{
+		case PulseLight:
+		case FlickerLight:
+		case RandomFlickerLight:
+		case ColorPulseLight:
+		case ColorFlickerLight:
+		case RandomColorFlickerLight:
+			if (secondary > 0) radius = float(intensity + secondary);
+			break;
+		default:
+			break;
+		}
 		if (radius <= 0) continue;
 		StaticLight l;
 		l.pos = { (float)light->X(), (float)light->Y(), (float)light->Z() };
@@ -714,4 +757,10 @@ void GI_SetUniforms(HWViewpointUniforms &uniforms)
 CCMD(r_gi_rebake)
 {
 	GI_LevelLoaded(nullptr);
+}
+
+FVector3 GI_TextureAlbedo(FTextureID id)
+{
+	Vec3 albedo = TextureAlbedo(id);
+	return { albedo.x, albedo.y, albedo.z };
 }

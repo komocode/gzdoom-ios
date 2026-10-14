@@ -15,8 +15,8 @@ struct Surface
 	int numVerts;
 	unsigned int startVertIndex;
 	secplane_t plane;
-	sector_t *controlSector;
-	bool bSky;
+	sector_t *controlSector = nullptr;
+	bool bSky = false;	// not every surface type sets it
 };
 
 class DoomLevelMesh : public hwrenderer::LevelMesh

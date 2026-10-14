@@ -1,8 +1,8 @@
 # Modern rendering on Apple platforms
 
 This port adds an optional modern lighting pipeline to GZDoom's hardware
-renderer (Vulkan through MoltenVK) and a better-looking software path for
-Apple Watch. Everything sits behind independent toggles. `r_preset 0` keeps
+renderer, a native Metal renderer for it (with ray traced shadows and MetalFX
+upscaling), and a better-looking software path for Apple Watch. Everything sits behind independent toggles. `r_preset 0` keeps
 the classic GZDoom presentation, and no feature changes gameplay or map data.
 
 The approach favours what pays off most per unit of GPU time on tile-based
@@ -30,54 +30,62 @@ Apple GPUs:
 | HDR / tone mapping | `gl_tonemap 6` (ACES filmic) | ACES (Narkowicz fit) added to the existing tonemap choices, together with the existing auto-exposure. | existing pass |
 | Contact shadows | `r_actorspriteshadow 2`, `r_actorspriteshadowfadeheight` | GZDoom's projected sprite shadows, always on from medium up and faded with height, plus AO. | existing |
 | Temporal anti-aliasing | `r_taa` | The 3D projection is jittered by a subpixel Halton(2,3) offset each frame. The resolve reprojects last frame's HDR result through the depth buffer and camera motion, clips it to the current 3x3 neighbourhood in YCoCg (rejecting stale history from moving sprites and disocclusions, which have no motion vectors) and blends with luminance weights. Runs before bloom and tone mapping. History resets on teleports, menus and resolution changes. Replaces FXAA from High up. | 1 full-res pass + copy |
+| Temporal upscaling | `r_upscale` (0.5–1, 1 = off; needs `r_taa`), `r_upscale_metalfx` | The 3D scene renders into a smaller part of the scene viewport and is reconstructed to the full viewport. On the Metal renderer this is MetalFX's temporal upscaler, fed with the HDR colour, depth and camera motion vectors computed from depth and the previous camera. Elsewhere (or with `r_upscale_metalfx 0`) the TAA resolve does it: each output pixel is a Gaussian-weighted sum of the nearby jittered input samples, and the history counts for more where no sample landed near the pixel. More jitter phases are used while upscaling (16, or 32 below 0.7). Exposure, bloom, tone mapping, the weapon sprite and the HUD all run at output resolution, unlike `vid_scalefactor`, which scales the HUD too. | Scene cost × scale²; resolve replaces TAA |
+| Ray traced shadows | `vk_raytrace` (Metal renderer; restart) | On GPUs with Metal ray tracing, the scene shaders trace shadow rays for dynamic lights against an acceleration structure over the level mesh, instead of GZDoom's 2D shadow maps. Unlike the shadow maps, they respect height, 3D floors and overhangs. `gl_shadowmap_filter` sets the soft-shadow sample count. Off by default; hardware ray tracing (M3, A17 Pro and later) is recommended. | 1–28 rays per shadowed light and pixel |
 | Modern bloom | `gl_bloom`, `r_bloom_modern` | 13-tap downsample chain (6 levels) with a soft-knee threshold, then a tent-filtered additive upsample. Fewer passes than the classic Gaussian bloom and no flicker on small highlights. | ~12 small passes |
 | Sharpen, vignette, grain | `r_sharpen`, `r_vignette`, `r_grain` | One pass: contrast-adaptive sharpening (CAS), a vignette, and triangular grain that also removes banding. | one full-screen pass |
+| GPU particles | `r_gpuparticles` (1 normal, 2 dense) | Visual-only and stateless. Hitscan shots draw a tracer, eject a brass casing that lies on the floor for a few seconds and leave a wisp of gun smoke. Bullet impacts throw sparks, chips and a lingering dust cloud in the colour of the surface that was hit, sprayed along its normal and faded softly where they meet that surface and the floor. Blood throws droplets, explosions throw a fireball, embers, debris and rising smoke, and glowing projectiles burst in their light's colour. Each particle is written once into a ring of persistent vertex memory; the vertex shader evaluates the motion in closed form (gravity, drag, resting on the floor, sparks stretched along their velocity), so the CPU simulates nothing per frame. Game particles, RNG, savegames and netplay are untouched. | Draws only the live part of a 16384-particle ring; 2 draws |
 | Planar reflections | `gl_plane_reflection`, `gl_mirrors` | Already in GZDoom for mirrors and reflective planes; left as is. SSR adds reflections where maps don't author them. | existing |
 
 ### Not implemented, and why
 
-- **TAAU (temporal upscaling).** TAA is implemented (above), but it resolves at
-  render resolution. Upscaling uses `vid_scalefactor` with linear filtering plus
-  CAS sharpening (`r_sharpen`), which is close to FSR 1. Proper temporal
-  upscaling needs per-object motion vectors, which GZDoom doesn't produce; the
-  right path is MetalFX in a native Metal backend (see below).
-- **GPU particles.** GZDoom's particles are simulated by game logic and
-  synchronised over the network. Moving them to compute would change behaviour
-  and needs a compute path the MoltenVK backend doesn't have. Deferred.
-- **Hardware ray tracing.** GZDoom's RT path (`vk_raytrace`) needs Vulkan ray
-  queries, which MoltenVK does not expose. A native Metal backend could use
-  Metal ray tracing on M3/A17 Pro and later for RT shadows on top of the
-  baked GI.
+- **Per-object motion vectors.** GZDoom doesn't produce them, so TAA and both
+  upscalers reproject with depth and camera motion only, and rely on
+  neighbourhood clipping (or MetalFX's own rejection) for moving sprites.
+- **Ray tracing on Vulkan through MoltenVK.** MoltenVK does not expose ray
+  queries; ray traced shadows need the Metal renderer.
 - **Nanite-style geometry.** Not useful for Doom-scale geometry.
 
-### Native Metal backend: evaluation
+## Metal renderer
 
-MoltenVK translates Vulkan to Metal at good quality. The remaining costs on
-Apple GPUs:
+`vid_preferbackend 4` (the default on Apple platforms; **Options → Display →
+Video mode → Preferred rendering API**) selects a native Metal renderer. Vulkan
+through MoltenVK (`vid_preferbackend 1`) stays available.
 
-- Render passes cannot use memoryless attachments or tile shaders, so the
-  G-buffer goes through memory.
-- Push-constant and descriptor-indexing limits apply (hence the 7-light
-  volumetric cap).
-- No ray queries.
-- No MetalFX.
+- **Same shaders.** GZDoom's GLSL is assembled exactly as for Vulkan,
+  compiled to SPIR-V by glslang and translated to Metal Shading Language by
+  SPIRV-Cross at startup. The Vulkan descriptor layout maps onto fixed Metal
+  buffer, texture and sampler slots, so shader changes (including mod material
+  shaders and custom postprocess shaders) work on both renderers.
+- **Same structure.** The device, render state, buffers, textures, render
+  targets and postprocess passes mirror the Vulkan backend
+  (`src/common/rendering/metal/`), so the hardware renderer, the 2D drawer and
+  every postprocess pass run unchanged. Like the Vulkan backend, it waits for
+  the GPU at the end of each frame.
+- **Unified memory.** Buffers and uploaded textures use shared storage: no
+  staging copies. Mipmaps are generated on the GPU in a separate upload command
+  buffer that runs before the frame.
+- **Features only Metal has here:** MetalFX temporal upscaling and ray traced
+  shadows (above), and MSAA through Metal's resolve. Simulator SDKs and tvOS
+  have no usable MetalFX; there the TAA resolve upscales.
+- **Cleared targets.** New render targets and postprocess textures start at
+  zero. Stale memory there can hold NaNs, which every blended draw keeps
+  (NaN × 0 is NaN); 2D-only screens such as the title then came out magenta
+  until something rewrote the target. The Vulkan pipeline images are cleared
+  the same way.
+- **Checked:** Metal API validation is clean through startup, menus, level
+  changes and wipes, savegames, screenshots, MSAA, every preset, particles,
+  upscaling and ray tracing. With a point light placed beside an E1M1 pillar,
+  the traced shadow falls diagonally across the floor below, where the shadow
+  map shades a full-height band. Frames match the Vulkan renderer: Classic is
+  pixel-identical; Ultra differs on 0.1–0.3% of pixels (MSAA included), from
+  exposure adaptation timing.
 
-A native backend would be a new `src/common/rendering/metal` beside `vulkan`,
-implementing `DFrameBuffer`, `FRenderState` and the `PPRenderState` hooks. The
-shaders compile from the same GLSL through SPIRV-Cross, as MoltenVK already
-does.
+Not done yet: HDR output (`vk_hdr`), and memoryless G-buffer attachments,
+which need the postprocess passes that read the G-buffer to move into tile
+shaders. GPU frame time is shown with `stat gpu`.
 
-Payoff:
-
-- About 20–30% less bandwidth from memoryless G-buffer targets and tile-shaded
-  SSAO.
-- MetalFX temporal upscaling.
-- Metal ray tracing.
-
-It's a multi-month project. Everything in this document works without it, so it
-is a later step rather than a dependency.
-
-### Light definitions
+## Light definitions
 
 Apple builds default `autoloadlights` and `autoloadbrightmaps` to on (upstream
 default: off, enabled from the Windows/Linux startup dialog, which the Apple
@@ -91,13 +99,13 @@ from 0 to 49 static lights.
 afterwards. Choosing a preset in the menu or console turns `r_preset_auto`
 off, which keeps the platform from changing it again.
 
-| Preset | GI | Relief / specular | Parallax | SSAO | SSR | SSGI | Volumetric | Tonemap | Shadow filter / size | Sprite shadows | AA |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0 Classic | – | – | – | off | off | – | off | off | 1 / 128 | default | – |
-| 1 Low | ✓ | ✓ | – | off | off | – | off | ACES | 1 / 128 | default | – |
-| 2 Medium | ✓ | ✓ | – | 1 | liquids | – | half | ACES | 1 / 256 | always | – |
-| 3 High | ✓ | ✓ | ✓ | 2 | + floors | – | half | ACES | 2 / 512 | always | TAA |
-| 4 Ultra | ✓ | ✓ | ✓ | 3 | + floors | ✓ | full | ACES | 3 / 1024 | always | TAA |
+| Preset | GI | Relief / specular | Parallax | SSAO | SSR | SSGI | Volumetric | Tonemap | Shadow filter / size | Sprite shadows | Particles | AA |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 Classic | – | – | – | off | off | – | off | off | 1 / 128 | default | – | – |
+| 1 Low | ✓ | ✓ | – | off | off | – | off | ACES | 1 / 128 | default | normal | – |
+| 2 Medium | ✓ | ✓ | – | 1 | liquids | – | half | ACES | 1 / 256 | always | normal | – |
+| 3 High | ✓ | ✓ | ✓ | 2 | + floors | – | half | ACES | 2 / 512 | always | dense | TAA |
+| 4 Ultra | ✓ | ✓ | ✓ | 3 | + floors | ✓ | full | ACES | 3 / 1024 | always | dense | TAA |
 
 All presets above Classic enable the modern bloom and dynamic-light shadow
 maps. The menu is under **Options → Display → Modern Rendering**.
@@ -112,10 +120,16 @@ maps. The menu is under **Options → Display → Modern Rendering**.
 | Mac, Apple Silicon, ≥ 16 GB | Ultra | Pro/Max class |
 | iPhone/iPad A12 (Apple GPU family 5) | Low | 720p, 60 fps |
 | A13 with ≥ 3 GB | Medium | 1080p |
-| A14 / M1 iPad with ≥ 5 GB | High | 1440p, 120 Hz where available |
-| A16+ / M-series iPad with ≥ 7 GB | Ultra | 1600p |
-| Apple TV 4K (2nd gen, A12) | High | 1440p, on mains power |
+| A14 / M1 iPad with ≥ 5 GB | High | 1440p 3D, 120 Hz where available |
+| A16+ / M-series iPad with ≥ 7 GB | Ultra | 1600p 3D |
+| Apple TV 4K (2nd gen, A12) | High | 1440p 3D, on mains power |
 | Apple TV 4K (3rd gen, A15) | Ultra | 2160p |
+
+The heights are the 3D render budget. High and Ultra use TAA, which replaces
+MSAA, and upscale temporally to an output up to 1.25 times taller (never above
+the display), so the HUD and post-processing are sharper at the same 3D cost.
+Low and Medium render at the budget height with MSAA, and the output is scaled
+with `vid_scalefactor`.
 
 Thermal state and Low Power Mode lower the preset at runtime:
 
@@ -159,6 +173,13 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
 - The G-buffer's SceneFog alpha encodes reflectivity. Values above 0.5 mark a
   scene surface, and (1 − a) × 2 is its reflectivity, so cleared sky pixels
   never reflect.
+- GPU particles share the scene shaders: `uMaterialParams.w > 0` switches
+  `main.vp` and `main.fp` to the particle path (w is the current time, z picks
+  the additive or alpha-blended pass). They are drawn after the translucent
+  pass of the main view only, so mirrors and portals don't show them. There is
+  no depth-buffer soft fade (the scene depth isn't readable during the scene
+  pass on this backend); particles fade near the camera, and sparks and dust
+  start just in front of the surface they came from.
 - Post-process uniforms are Vulkan push constants. The volumetric block is
   kept at 256 bytes (`static_assert`) so it works outside MoltenVK too.
 - Platform presets are applied through `R_SetAutoPreset`, which does nothing
@@ -170,9 +191,24 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
   family 2), GI baked in 0.26 s with 49 lights at 2160p, and with Ultra forced
   (SSGI and parallax on) it rendered with sprites intact.
   Ultra forced on the iPhone 16e simulator (TAA and SSGI on, render scale
-  0.77) also rendered correctly.
+  0.77) also rendered correctly. With a fresh config the iPhone simulator now
+  starts on the Metal renderer, and the title loop, menus and E1M1 render
+  correctly; the Apple TV simulator checks above predate it. The iOS, tvOS and
+  simulator builds all compile it.
 - TAA was checked on the Mac with static and turning captures: edges and
   texture shimmer resolve, and there is no ghosting or doubling while turning.
+- GPU particles were checked on E1M1 on the Mac: floor and wall impacts (sparks,
+  surface-coloured chips and dust), rocket explosions (fireball, embers, debris,
+  smoke) and blood.
+- Temporal upscaling was checked on the Mac at `r_upscale 0.5`: the image
+  matches native TAA closely (texture detail is slightly softer), the HUD
+  stays sharp, and turning shows no ghosting.
+- The GI bake no longer depends on when the scene is captured: it uses the base
+  texture rather than the current animation frame for albedo, flickering and
+  glowing sectors at their average level, pulsing lights at their average
+  radius, and a level mesh flag (`bSky`) that some surface types left
+  uninitialised now defaults to false. Runs of the same map now bake the same
+  volume.
 - Testing note: console commands passed with `+` on the command line run before
   the window exists, so the automatic preset overrides them. Use
   `+"wait 2; r_preset 3; …"` when scripting captures.

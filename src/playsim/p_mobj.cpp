@@ -102,6 +102,7 @@
 #include "shadowinlines.h"
 #include "teaminfo.h"
 #include "thingdef.h"
+#include "hw_gpuparticles.h"
 
 // MACROS ------------------------------------------------------------------
 
@@ -1977,6 +1978,7 @@ void P_ExplodeMissile (AActor *mo, line_t *line, AActor *target, bool onsky, FNa
 			return;
 		}
 	}
+	if (!onsky) FX_MissileExploded(mo);
 	mo->Vel.Zero();
 	mo->effects = 0;		// [RH]
 	mo->flags &= ~MF_SHOOTABLE;
@@ -7016,6 +7018,8 @@ AActor *P_SpawnPuff (AActor *source, PClassActor *pufftype, const DVector3 &pos1
 		puff->SetState (puff->MeleeState);
 	}
 
+	FX_PuffSpawned(source, puff, pos, hitdir, flags);
+
 	if (!(flags & PF_TEMPORARY))
 	{
 		if (cl_pufftype && updown != 3 && (puff->flags4 & MF4_ALLOWPARTICLES))
@@ -7155,6 +7159,8 @@ AActor *P_SpawnBlood (const DVector3 &pos1, DAngle dir, int damage, AActor *orig
 
 	if (bloodtype >= 1)
 		P_DrawSplash2 (originator->Level, 40, pos, dir, 2, originator->BloodColor);
+
+	FX_BloodSpawned(originator, pos, dir, damage);
 
 	return th;
 }

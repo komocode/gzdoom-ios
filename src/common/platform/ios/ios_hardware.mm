@@ -18,7 +18,6 @@ EXTERN_CVAR(Float, vid_scalefactor)
 EXTERN_CVAR(Int, vid_scalemode)
 EXTERN_CVAR(Bool, vid_scale_linear)
 EXTERN_CVAR(Bool, vid_vsync)
-EXTERN_CVAR(Bool, vk_raytrace)
 static IOSHardware::Capabilities caps;
 static int lastThermal = -1;
 static bool lastLowPower;
@@ -51,7 +50,14 @@ void IOS_UpdateHardware()
     gl_bloom = settings.bloom;
     gl_texture_filter_anisotropic = settings.anisotropy;
     vid_scalemode = 0;
-    if (height > 0) vid_scalefactor = std::min(1.f, float(settings.maxRenderHeight) / height);
+    if (height > 0)
+    {
+        // With TAA the scene renders at maxRenderHeight and is upscaled to a
+        // sharper output; otherwise the output is the render resolution.
+        float output = std::min(float(height), settings.maxRenderHeight * settings.outputScale);
+        vid_scalefactor = output / height;
+        r_upscale = std::clamp(settings.maxRenderHeight / output, 0.5f, 1.f);
+    }
     vid_scale_linear = true;
     lastThermal = state;
     lastLowPower = low;
@@ -75,11 +81,9 @@ void IOS_ApplyHardwareDefaults()
     if (gpu.argumentBuffersSupport < MTLArgumentBuffersTier2)
         setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
     initialized = true;
-    vid_preferbackend = 1;
+    // Vulkan through MoltenVK (1) or the native Metal renderer (4).
+    if (vid_preferbackend != 4) vid_preferbackend = 1;
     vid_vsync = true;
-    // The renderer needs Vulkan ray queries; Metal support alone is insufficient.
-    // MoltenVK currently does not expose that extension, so disable the path.
-    vk_raytrace = false;
     IOS_UpdateHardware();
     Printf("Apple GPU: %s, family %d, %.1f GiB memory, %d Hz display; Metal/Vulkan renderer\n", gpu.name.UTF8String, family, caps.memoryBytes / double(1024ull*1024*1024), caps.refreshRate);
 }
