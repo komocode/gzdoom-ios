@@ -324,13 +324,73 @@ GPU particles from game code: fill an `FXParticleParams` (`count`, `color1` /
 and call `Level.SpawnFXParticles(p)`. Shapes are `FXS_Glow`, `FXS_Smoke`,
 `FXS_Chunk`, `FXS_Droplet`, `FXS_Ring` and `FXS_Mote`. Flags are
 `FXF_Additive` (additive and emissive), `FXF_Unlit` (alpha blended but
-emissive) and `FXF_RestOnFloor`. `FXEmitter` is an invisible actor that emits
+emissive), `FXF_RestOnFloor` and `FXF_NoDistanceScale`. Builds that thin
+new emissions with camera distance keep the full count of flagged emitters
+(such as surf at the foot of distant cliffs) and cull them only beyond 8192
+units; this build doesn't thin by distance, so the flag changes nothing here.
+`FXEmitter` is an invisible actor that emits
 them continuously (`Rate` per second) and/or in bursts, optionally following
 its `master`; subclasses override `SetupParticles`. Examples: `FXTorchEmbers`,
 `FXDustMotes`, `FXSteamVent`, `FXSparkShower` and `FXSeaSpray`. Emitters use
 only the particles' own random generator, so they are netplay- and demo-safe;
 the particles themselves are not saved. `+SOFTPARTICLE` on a translucent
 sprite actor makes it fade into the scene like the GPU particles.
+
+## Map atmosphere
+
+Opt-in MAPINFO map keys for a map's look. Maps without them render and bake
+exactly as before.
+
+```
+gisky = "18 22 3a", 0.6              // GI sky radiance: colour, intensity
+gimoon = 35, 28, "9cb4ff", 2.5, 24   // GI moon: yaw, pitch, colour, intensity, exponent
+rainscatter = 1.5                    // volumetric scattering added by rain
+volumetricstrength = 0.4             // multiplies r_volumetric_strength on this map (0-8)
+ssrstretch = 4                       // replaces r_ssr_stretch on this map (> 0)
+forceheightfog                       // height fog even with r_heightfog off
+forcebloom                           // bloom even with gl_bloom off
+```
+
+- **`gisky`** replaces the sky radiance of the GI bake (normally the sky
+  texture's average colour) with colour / 255 × intensity (default 1). Sky
+  fog (`skyfog`) still blends it toward the fog colour.
+- **`gimoon`** adds a directional lobe to GI rays that hit the sky:
+  colour / 255 × intensity × max(0, ray · moon)^exponent, with the moon at
+  (cos pitch cos yaw, cos pitch sin yaw, sin pitch) in map space: yaw 0 is
+  east (+x), 90 north (+y), pitch is the elevation. The exponent (default 32)
+  is optional. Diffuse probes and reflection probes see the same sky. Lobes
+  sharper than a bake can sample (fewer than about four rays or reflection
+  texels inside the lobe) are widened with the same energy (linear energy for
+  reflections), so probes don't flicker between catching and missing the moon.
+  The bake summary (`developer`) reports both and the widened exponents.
+- **`rainscatter`** adds rainscatter × weather density to the scattering of
+  the volumetric medium while the map's weather is rain, so flood and spot
+  lights read as beams in the rain outdoors. It is scaled by how much of the
+  area within about 256 units of the camera is in the rain (open sky in the
+  sky exposure map, not under a 3D floor roof above the camera; under cover,
+  only rain seen through doors and windows counts) and eased in and out, and
+  starts at the right value on a new map or a loaded save. Thin air counts as
+  1, so `rainscatter = 1` at density 1 doubles the scattering; 0.5–2 suits
+  most maps (4 washes out a small courtyard). It does not absorb, unlike fog.
+  `stat volumetric` shows the current value.
+- **`volumetricstrength`** (0–8, default 1) multiplies the player's
+  `r_volumetric_strength` on this map, for maps whose many lights would
+  saturate the scattering (a night storm with hundreds of lamps) or that need
+  more of it. It scales only the light scattered by the volumetric pass,
+  including the glow of lights in fog and rain; the height fog's colour and
+  absorption are unchanged. 0 drops every light from the pass. It is a balance
+  value, not an override of a preference, so `r_map_atmosphere 0` keeps it.
+  `stat volumetric` shows it as "map strength". Single lights can be scaled
+  with their `arg4` (see [Light definitions](#light-definitions)).
+- **`forceheightfog`**, **`forcebloom`** and **`ssrstretch`** override the
+  player's `r_heightfog`, `gl_bloom` and `r_ssr_stretch` on this map without
+  changing the CVARs (nothing is written to the ini). Height fog still needs
+  `r_volumetric`, and bloom follows `r_bloom_modern`; with `r_preset_auto`,
+  `forcebloom` does not bring back bloom that the Apple quality policy turned
+  off (lowest GPU tiers, low power mode, heat). The flags take an optional
+  `= true` / `= false` (or on/off, yes/no, 1/0). `r_map_atmosphere 0`
+  (archived, default 1, "Map atmosphere overrides" in the Modern Rendering
+  menu) ignores these three.
 
 ## Light definitions
 
@@ -339,6 +399,29 @@ default: off, enabled from the Windows/Linux startup dialog, which the Apple
 port doesn't have). Without them, the stock games have no dynamic lights for
 the specular, volumetric and baked-GI passes to use. In E1M1 the GI bake goes
 from 0 to 49 static lights.
+
+Map-placed point and spot light things that don't animate (DoomEdNums 9800,
+9810, 9820, 9830, 9840, 9850, 9860, 9870: `PointLight`, `SpotLight` and their
+additive, subtractive and attenuated variants) don't use their fifth argument,
+so `arg4` sets the light's volumetric scattering in percent:
+
+| `arg4` | Volumetric scattering |
+| --- | --- |
+| 0 (default) | 100%, as before |
+| N > 0 | N% (capped at 1000), e.g. 25 for a quarter, 300 for three times |
+| N < 0 | none: the light is not a candidate for the pass at all |
+
+It scales both the light's rank among the 32 volumetric lights and its
+scattered colour; surface lighting, shadows and the GI bake are unchanged
+(subtractive lights never scatter). Vavoom lights (1502, 1503, 9825) follow the
+same rule. Hexen-format maps store thing arguments as bytes (0–255), so turning
+a light's scattering off with a negative value, or going above 255%, needs a
+UDMF map (or ACS at run time). Changes made at run time (ACS `SetThingSpecial`)
+apply on the next tic, or when the light is activated. Pulse, flicker and random
+flicker lights (9801, 9802, 9804 and the matching numbers in each family) keep
+`arg4` as their secondary intensity; they, sector lights (9803 and its matches,
+which don't read `arg4`) and lights attached through GLDEFS or `A_AttachLight`
+always scatter at 100%.
 
 ## Quality presets
 
@@ -638,3 +721,80 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
 - Testing note: console commands passed with `+` on the command line run before
   the window exists, so the automatic preset overrides them. Use
   `+"wait 2; r_preset 3; …"` when scripting captures.
+
+## Authored sprite materials
+
+`r_sprite_pbr 1` enables per-pixel lighting for actor sprites that have authored
+normal, specular, metallic, roughness or occlusion maps. Sprites without maps
+retain their previous rendering. There is no runtime material inference or
+automatic normal generation for sprites. Fullbright, additive, fuzz, stencil,
+custom-shader and particle effects keep their previous treatment. Modern presets
+enable sprite lighting; Medium and above enable reflections. Existing saved
+configurations can enable the new controls under Modern Rendering / Sprite
+materials or with the console commands below.
+
+An optional material PK3 uses these paths for short sprite names:
+
+```
+materials/normalmaps/auto/SPRTA0.png
+materials/metallic/auto/SPRTA0.png
+materials/roughness/auto/SPRTA0.png
+materials/ao/auto/SPRTA0.png
+```
+
+Names must match each active frame and rotation. Full-path textures use the
+source path without its extension after the channel directory. Existing GLDEFS
+`material sprite` declarations also work. Author tangent normals with green +Y
+pointing upward (neutral RGB 128,128,255), scalar roughness/metallic/AO in red,
+and the original framing. The renderer aligns map borders and dimensions; check
+pixel alignment of generated maps before packaging. Authored specular
+maps retain their workflow. Partial maps use constant neutral defaults for
+missing channels, never material guesses from colour.
+
+- `r_sprite_pbr 0/1`: authored sprite lighting.
+- `r_sprite_reflections 0/1`: local environment reflections.
+- `r_sprite_light_strength 0..6`: direct-light intensity; 1 preserves the original response.
+  This scales diffuse and specular light together, retaining falloff, shadows,
+  material color and normal direction. Ambient and probe reflections keep their original intensity.
+- `r_sprite_normal_strength 0..3`: normal strength; 1 uses the authored map.
+- `r_sprite_debug 0..4`: lit, world normals, roughness, metallic, occlusion.
+- `r_gi_rebake`: refresh static bounce and reflection captures.
+
+Diffuse bounce follows the material normal. Direct lights use GGX highlights.
+Reflections use up to 128 spatially blended static room captures with four
+roughness levels, sampling room textures, sector lighting and static lights.
+These are low-resolution environment probes. Moving actors and changing doors
+are not captured live; rebaking refreshes the static snapshot. Translucent map
+geometry and unusual wall UV transforms remain approximate. Sprite materials do
+not create body geometry, change silhouettes, displace depth or cast volumetric
+self shadows.
+
+Asset workflow (requires Pillow):
+
+```sh
+python3 scripts/sprite_material_assets.py extract /path/to/game.pk3 --palette-wad /path/to/base.wad --out /path/to/extracted
+# Author normalmaps/, metallic/, roughness/ and ao/ atlas images at the exact
+# atlas size. Inspect every frame against the original and preserve placement.
+python3 scripts/sprite_material_assets.py pack --manifest /path/to/extracted/manifest.json --authored /path/to/authored --output /path/to/game-materials.pk3
+```
+
+The tool extracts and packs pixels; it does not invent materials. It records
+active frames and offsets, rejects incomplete channel sets by default, and
+writes a coverage receipt into the PK3. Source artwork and the authored pack
+belong with the supplied game, not the engine's generic asset archive.
+
+```sh
+python3 scripts/test_sprite_material_assets.py
+python3 scripts/tests/test_sprite_reflections.py
+python3 scripts/tests/validate_sprite_shaders.py
+python3 scripts/tests/sprite_lighting_scene.py /tmp/sprite-lighting-test
+```
+
+The shader validator checks that an unmapped sprite is byte-identical with
+sprite features enabled or disabled. Add `--preview-dir /tmp/sprite-preview`
+to export synthetic spatial-material previews without opening a game window.
+Those previews compare flat-normal PBR with normal-mapped PBR, not the classic
+renderer.
+
+The last command creates a synthetic analytic sphere and an unmapped control
+for renderer checks. This is test data, not production material generation.

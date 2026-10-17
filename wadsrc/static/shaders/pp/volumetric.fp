@@ -166,12 +166,13 @@ float Transmittance(float t)
 	return exp(-(HeightOpticalDepth(Camera.y - FogParams.x, Dir.y, t) + FogParams.w * t));
 }
 
-// How much the medium at p scatters, relative to thin air.
+// How much the medium at p scatters, relative to thin air. Rain (MAPINFO
+// rainscatter, 0 elsewhere) scatters without absorbing, so beams show in it.
 float Medium(vec3 p)
 {
 	float density = FogParams.w;
 	if (FogParams.z > 0.0) density += HeightDensity(p.y) * MistNoise(p);
-	return 1.0 + FogScatter * density * MEDIUM_SCALE;
+	return 1.0 + FogScatter * density * MEDIUM_SCALE + RainScatter;
 }
 
 //===========================================================================

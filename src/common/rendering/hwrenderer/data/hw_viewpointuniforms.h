@@ -48,6 +48,10 @@ struct HWViewpointUniforms
 	FVector4 mWeatherParams = { 0, 0, 0, 0 };	// cell count y, lightning flash (0-1), time in seconds, unused
 	FVector4 mSceneDepthMap = { 0, 0, 0, 0 };	// fragment position to half-res linear depth texel: scale (xy), offset (zw)
 
+	FVector4 mReflectionOrigin = { 0, 0, 0, 1 }; // Doom XYZ origin and probe spacing
+	FVector4 mReflectionSize = { 0, 0, 0, 0 }; // XYZ probe counts, first atlas array layer
+	FVector4 mReflectionAtlas = { 0, 0, 0, 0 }; // tiles per layer XY, octahedral resolution, enabled
+
 	void CalcDependencies()
 	{
 		mNormalViewMatrix.computeNormalMatrix(mViewMatrix);

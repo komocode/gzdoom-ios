@@ -778,6 +778,9 @@ public:
 	PalEntry	heightfogcolor;
 	DVector2	heightfogwind;
 
+	// Opt-in GI sky/moon, rain scattering and render overrides, from MAPINFO.
+	FMapAtmosphereInfo atmosphere;
+
 	FGlobalDLightLists lightlists;
 
 	FDynamicLight *lights;

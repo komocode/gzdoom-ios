@@ -225,6 +225,9 @@ static const char *shaderBindings = R"(
 		vec4 uWeatherMap;
 		vec4 uWeatherParams;
 		vec4 uSceneDepthMap;
+		vec4 uReflectionOrigin;
+		vec4 uReflectionSize;
+		vec4 uReflectionAtlas;
 	};
 
 	layout(set = 1, binding = 1, std140) uniform readonly MatricesUBO {

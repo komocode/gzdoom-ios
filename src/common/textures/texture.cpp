@@ -325,6 +325,7 @@ bool FTexture::ProcessData(unsigned char* buffer, int w, int h, bool ispatch)
 
 FTextureBuffer FTexture::CreateTexBuffer(int translation, int flags)
 {
+	if (IsMaterialData()) translation = 0;
 	FTextureBuffer result;
 	if (flags & CTF_Indexed)
 	{
@@ -374,9 +375,29 @@ FTextureBuffer FTexture::CreateTexBuffer(int translation, int flags)
 
 				FBitmap bmp(buffer, W * 4, W, H);
 
-				bmp.Blit(exx, exx, Pixels);
+				if (IsMaterialData())
+				{
+					// Blit skips alpha-zero pixels; a zero height is valid normal
+					// data and must retain its RGB components.
+					for (int y = 0; y < Pixels.GetHeight(); ++y)
+						memcpy(buffer + ((y + exx) * W + exx) * 4, Pixels.GetPixels() + y * Pixels.GetPitch(), Pixels.GetWidth() * 4);
+				}
+				else bmp.Blit(exx, exx, Pixels);
 			}
 			
+			if (exx && IsMaterialData())
+			{
+				// Color sprites use a transparent expanded border; data maps must
+				// extend edge values to avoid black/invalid normal interpolation.
+				for (int y = 1; y < H - 1; ++y)
+				{
+					memcpy(buffer + y * W * 4, buffer + (y * W + 1) * 4, 4);
+					memcpy(buffer + (y * W + W - 1) * 4, buffer + (y * W + W - 2) * 4, 4);
+				}
+				memcpy(buffer, buffer + W * 4, W * 4);
+				memcpy(buffer + (H - 1) * W * 4, buffer + (H - 2) * W * 4, W * 4);
+			}
+
 			if (IsLuminosityTranslation(translation))
 			{
 				V_ApplyLuminosityTranslation(LuminosityTranslationDesc::fromInt(translation), buffer, W * H);
@@ -545,6 +566,7 @@ outl:
 
 IHardwareTexture* FTexture::GetHardwareTexture(int translation, int scaleflags)
 {
+	if (IsMaterialData()) translation = 0;
 	int indexed = scaleflags & CTF_Indexed;
 	if (indexed) translation = -1;
 	IHardwareTexture* hwtex = SystemTextures.GetHardwareTexture(translation, scaleflags);

@@ -344,6 +344,27 @@ struct FWeatherSettings
 	uint32_t Color = 0;			// tint; 0 = default (cool grey rain, white snow)
 };
 
+// Opt-in map atmosphere (MAPINFO gisky, gimoon, rainscatter, volumetricstrength,
+// ssrstretch, forceheightfog, forcebloom). Maps without these keys render as
+// before. The overrides never write the user's CVARs; r_map_atmosphere 0 ignores
+// the last three.
+struct FMapAtmosphereInfo
+{
+	bool GISky = false;				// gisky: replaces the sky texture's average colour in the GI bake
+	uint32_t GISkyColor = 0;
+	float GISkyIntensity = 1.f;
+	uint32_t GIMoonColor = 0;		// gimoon: directional lobe added to GI rays that hit the sky
+	float GIMoonIntensity = 0.f;	// 0: no moon
+	float GIMoonYaw = 0.f;			// degrees, map space: 0 east (+x), 90 north (+y)
+	float GIMoonPitch = 45.f;		// degrees above the horizon
+	float GIMoonExponent = 32.f;	// lobe sharpness
+	float RainScatter = 0.f;		// extra volumetric scattering per unit of rain density
+	float VolumetricStrength = 1.f;	// volumetricstrength: multiplies r_volumetric_strength (in-scattered light only)
+	float SSRStretch = 0.f;			// > 0 replaces r_ssr_stretch
+	bool ForceHeightFog = false;	// height fog even with r_heightfog off (needs r_volumetric)
+	bool ForceBloom = false;		// bloom even with gl_bloom off
+};
+
 struct level_info_t
 {
 	int			levelnum;
@@ -417,6 +438,7 @@ struct level_info_t
 	uint32_t	heightfogcolor;
 	DVector2	heightfogwind;
 	FWeatherSettings weather;
+	FMapAtmosphereInfo atmosphere;
 
 	// Redirection: If any player is carrying the specified item, then
 	// you go to the RedirectMap instead of this one.

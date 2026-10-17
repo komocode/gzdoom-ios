@@ -202,6 +202,7 @@ void MetalRenderDevice::ApplyAutoQuality()
 	gl_fxaa = s.fxaa;
 	gl_ssao = s.ssao;
 	gl_bloom = s.bloom;
+	R_SetDeviceBloom(s.bloom);	// MAPINFO forcebloom must not undo this either
 	gl_texture_filter_anisotropic = s.anisotropy;
 	// Mobile keeps height-correct traced shadows with one ray. Desktop starts
 	// with nine, rather than assuming Ultra's 27 rays fit every GPU.

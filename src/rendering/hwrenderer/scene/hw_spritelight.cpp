@@ -232,7 +232,7 @@ void HWDrawInfo::GetDynSpriteLight(AActor *thing, particle_t *particle, float *o
 // For multithread processing each worker thread needs its own copy, though.
 static thread_local TArray<FDynamicLight*> addedLightsArray; 
 
-void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata)
+void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata, const FVector4 *spriteBounds)
 {
 	modellightdata.Clear();
 
@@ -242,10 +242,12 @@ void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata)
 
 		addedLights.Clear();
 
-		float x = (float)self->X();
-		float y = (float)self->Y();
-		float z = (float)self->Center();
-		float actorradius = (float)self->RenderRadius();
+		// Sprite extents can exceed actor collision/render bounds (weapons, wings,
+		// scaled decorations). Cull against the displayed quad, not the feet.
+		float x = spriteBounds ? spriteBounds->X : (float)self->X();
+		float y = spriteBounds ? spriteBounds->Y : (float)self->Y();
+		float z = spriteBounds ? spriteBounds->Z : (float)self->Center();
+		float actorradius = spriteBounds ? spriteBounds->W : (float)self->RenderRadius();
 		float radiusSquared = actorradius * actorradius;
 		dl_validcount++;
 

@@ -228,6 +228,7 @@ public:
 
 	IHardwareTexture* GetHardwareTexture(int translation, int scaleflags);
 	virtual FImageSource *GetImage() const { return nullptr; }
+	virtual bool IsMaterialData() const { return false; }
 	void CreateUpsampledTextureBuffer(FTextureBuffer &texbuffer, bool hasAlpha, bool checkonly);
 
 	void CleanHardwareTextures()

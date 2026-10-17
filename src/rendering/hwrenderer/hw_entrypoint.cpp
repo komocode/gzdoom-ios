@@ -367,6 +367,7 @@ sector_t* RenderView(player_t* player)
 	}
 	hw_postprocess.SetTonemapMode(level.info ? level.info->tonemap : ETonemapMode::None);
 	if (level.info) hw_postprocess.grading.SetLevel(level.MapName, level.info->gradinglut, level.info->exposurebias);
+	R_SetMapAtmosphere(level.atmosphere.ForceBloom, level.atmosphere.SSRStretch);
 
 	sector_t* retsec;
 	if (!V_IsHardwareRenderer())

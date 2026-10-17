@@ -89,6 +89,7 @@ class FGameTexture
 	RefCountedPtr<FTexture> Base;
 	RefCountedPtr<FTexture> Brightmap;
 	std::unique_ptr<FMaterialLayers> Layers;
+	std::unique_ptr<FMaterialLayers> SpriteLayers; // authored data maps with matching sprite dimensions
 
 	FString Name;
 	FTextureID id;
@@ -104,6 +105,7 @@ class FGameTexture
 
 	ISoftwareTexture* SoftwareTexture = nullptr;
 	FMaterial* Material[5] = {  };
+	FMaterial* SpriteMaterial[4] = { }; // independent cache preserves classic rendering
 
 	// Material properties
 	FVector2 detailScale = { 1.f, 1.f };
@@ -360,6 +362,11 @@ public:
 			{
 				if (tex != nullptr) layers.Push(tex.get());
 			}
+		}
+		if (SpriteLayers)
+		{
+			for (auto tex : { SpriteLayers->Normal.get(), SpriteLayers->Specular.get(), SpriteLayers->Metallic.get(), SpriteLayers->Roughness.get(), SpriteLayers->AmbientOcclusion.get() })
+				if (tex != nullptr) layers.Push(tex);
 		}
 	}
 

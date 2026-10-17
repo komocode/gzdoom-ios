@@ -996,6 +996,8 @@ struct VolumetricFog
 	float NoiseScale = 1.0f / 160.0f;		// noise frequency per map unit
 	FVector3 NoiseOffset = { 0.0f, 0.0f, 0.0f };	// wind scroll, GL world space
 	float SectorDensity = 0.0f;				// sector fog around the camera
+	float RainScatter = 0.0f;				// extra scattering of rain (MAPINFO rainscatter), relative to thin air
+	float Strength = 1.0f;					// multiplies r_volumetric_strength (MAPINFO volumetricstrength)
 };
 
 struct VolumetricUniforms
@@ -1021,7 +1023,7 @@ struct VolumetricUniforms
 	int LightCount;
 	int Samples;
 	int SampleIndex;
-	int Padding;
+	float RainScatter;	// replaces the former padding: same size and layout
 
 	static std::vector<UniformFieldDesc> Desc()
 	{
@@ -1048,7 +1050,7 @@ struct VolumetricUniforms
 			{ "LightCount", UniformType::Int, offsetof(VolumetricUniforms, LightCount) },
 			{ "Samples", UniformType::Int, offsetof(VolumetricUniforms, Samples) },
 			{ "SampleIndex", UniformType::Int, offsetof(VolumetricUniforms, SampleIndex) },
-			{ "Padding", UniformType::Int, offsetof(VolumetricUniforms, Padding) },
+			{ "RainScatter", UniformType::Float, offsetof(VolumetricUniforms, RainScatter) },
 		};
 	}
 };

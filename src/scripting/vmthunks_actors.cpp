@@ -2236,7 +2236,7 @@ DEFINE_FIELD_X(FXParticleParams, FFXParticleParams, delay);
 // Visual-only GPU particles (hw_gpuparticles.h): no game state, no game RNG.
 static void SpawnFXParticles(FLevelLocals *Level, FFXParticleParams *params)
 {
-	FX_SpawnScripted(Level, *params);
+	FX_SpawnScriptedParticles(Level, *params);
 }
 
 DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SpawnFXParticles, SpawnFXParticles)

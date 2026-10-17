@@ -325,6 +325,7 @@ void level_info_t::Reset()
 	heightfogcolor = 0x80888c;
 	heightfogwind = { 0, 0 };
 	weather = {};
+	atmosphere = {};
 
 	specialactions.Clear();
 	DefaultEnvironment = 0;
@@ -1688,6 +1689,87 @@ DEFINE_MAP_OPTION(weathercolor, false)
 	parse.ParseAssign();
 	parse.sc.MustGetString();
 	info->weather.Color = V_GetColor(parse.sc) | 0xff000000;
+}
+
+// Opt-in map atmosphere (FMapAtmosphereInfo). Maps without these keys are unchanged.
+
+// gisky = "rr gg bb"[, intensity]: sky radiance of the GI bake, instead of the
+// sky texture's average colour (sky fog still blends it).
+DEFINE_MAP_OPTION(gisky, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetString();
+	info->atmosphere.GISky = true;
+	info->atmosphere.GISkyColor = V_GetColor(parse.sc);
+	info->atmosphere.GISkyIntensity = 1.f;
+	if (parse.CheckFloat()) info->atmosphere.GISkyIntensity = (float)max(parse.sc.Float, 0.);
+}
+
+// gimoon = yaw, pitch, "rr gg bb", intensity[, exponent]: a directional lobe
+// on GI rays that hit the sky. Yaw 0 = east, 90 = north; pitch above the horizon.
+DEFINE_MAP_OPTION(gimoon, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->atmosphere.GIMoonYaw = (float)parse.sc.Float;
+	parse.ParseComma();
+	parse.sc.MustGetFloat();
+	info->atmosphere.GIMoonPitch = (float)clamp(parse.sc.Float, -90., 90.);
+	parse.ParseComma();
+	parse.sc.MustGetString();
+	info->atmosphere.GIMoonColor = V_GetColor(parse.sc);
+	parse.ParseComma();
+	parse.sc.MustGetFloat();
+	info->atmosphere.GIMoonIntensity = (float)max(parse.sc.Float, 0.);
+	info->atmosphere.GIMoonExponent = 32.f;
+	if (parse.CheckFloat()) info->atmosphere.GIMoonExponent = (float)clamp(parse.sc.Float, 1., 4096.);
+}
+
+// rainscatter = amount: extra volumetric scattering in rain (times the weather density).
+DEFINE_MAP_OPTION(rainscatter, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->atmosphere.RainScatter = (float)clamp(parse.sc.Float, 0., 64.);
+}
+
+// volumetricstrength = amount: multiplies r_volumetric_strength on this map (0-8,
+// default 1). Scales only the light scattered by the volumetric pass, not the
+// height fog's colour or absorption. A balance value, so r_map_atmosphere 0 keeps it.
+DEFINE_MAP_OPTION(volumetricstrength, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->atmosphere.VolumetricStrength = (float)clamp(parse.sc.Float, 0., 8.);
+}
+
+// ssrstretch = amount: replaces r_ssr_stretch on this map while above 0.
+DEFINE_MAP_OPTION(ssrstretch, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->atmosphere.SSRStretch = (float)clamp(parse.sc.Float, 0., 8.);
+}
+
+// forceheightfog and forcebloom, optionally '= true' or '= false' (also on/off, yes/no, 1/0).
+static bool ParseAtmosphereFlag(FMapInfoParser &parse)
+{
+	if (!parse.CheckAssign()) return true;
+	parse.sc.MustGetString();
+	if (parse.sc.Compare("true") || parse.sc.Compare("on") || parse.sc.Compare("yes") || parse.sc.Compare("1")) return true;
+	if (parse.sc.Compare("false") || parse.sc.Compare("off") || parse.sc.Compare("no") || parse.sc.Compare("0")) return false;
+	parse.sc.ScriptError("Expected true or false, got '%s'", parse.sc.String);
+	return false;
+}
+
+DEFINE_MAP_OPTION(forceheightfog, false)
+{
+	info->atmosphere.ForceHeightFog = ParseAtmosphereFlag(parse);
+}
+
+DEFINE_MAP_OPTION(forcebloom, false)
+{
+	info->atmosphere.ForceBloom = ParseAtmosphereFlag(parse);
 }
 
 DEFINE_MAP_OPTION(skyfog, false)

@@ -1037,6 +1037,7 @@ set (PCH_SOURCES
 	common/fonts/v_text.cpp	
 	common/textures/hw_ihwtexture.cpp
 	common/textures/hw_material.cpp
+	common/textures/sprite_materials.cpp
 	common/textures/bitmap.cpp
 	common/textures/m_png.cpp
 	common/textures/texture.cpp

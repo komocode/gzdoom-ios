@@ -858,3 +858,11 @@ void FX_SpawnScripted(FLevelLocals *level, const FFXParticleParams &params)
 		Emit(p, now);
 	}
 }
+
+// Entry point of LevelLocals.SpawnFXParticles. This build does not thin
+// emissions with camera distance, so FXF_NoDistanceScale (sea spray at the
+// foot of distant cliffs) needs no special handling here.
+void FX_SpawnScriptedParticles(FLevelLocals *level, const FFXParticleParams &params)
+{
+	FX_SpawnScripted(level, params);
+}

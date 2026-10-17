@@ -2028,6 +2028,7 @@ void FLevelLocals::Init()
 	heightfognoise = info->heightfognoise;
 	heightfogcolor = info->heightfogcolor;
 	heightfogwind = info->heightfogwind;
+	atmosphere = info->atmosphere;
 
 	pixelstretch = info->pixelstretch;
 

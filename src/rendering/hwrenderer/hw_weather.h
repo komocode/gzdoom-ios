@@ -48,3 +48,10 @@ void Weather_Draw(HWDrawInfo *di, FRenderState &state);
 
 // Visual-only flash (no sector light change), e.g. for scripted lightning.
 void Weather_Flash(FLevelLocals *level, double strength, double duration);
+
+// Rain density (0-2, testing overrides included; 0 without rain) times the
+// fraction of points within about 256 map units of the camera that are in the
+// rain: under open sky in the exposure map, not under a 3D floor roof, and,
+// while the camera itself is under cover, reached by this frame's BSP walk.
+// For effects of the rain itself, such as light scattering in the volumetric pass.
+float Weather_RainAround(HWDrawInfo *di);

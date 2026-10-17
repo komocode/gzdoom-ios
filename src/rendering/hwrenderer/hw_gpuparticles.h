@@ -74,6 +74,7 @@ enum EFXFlags
 	FXF_Additive = 1,		// additive blend, emissive (sparks, embers, fire)
 	FXF_Unlit = 2,			// alpha blended but emissive: not lit by the scene
 	FXF_RestOnFloor = 4,	// land on the floor or 3D floor below the trajectory
+	FXF_NoDistanceScale = 8,	// no thinning with camera distance, for effects seen from afar (FX_SpawnScriptedParticles)
 };
 
 // Parameters of LevelLocals.SpawnFXParticles (ZScript struct FXParticleParams).
@@ -100,3 +101,5 @@ struct FFXParticleParams
 };
 
 void FX_SpawnScripted(FLevelLocals *level, const FFXParticleParams &params);
+// LevelLocals.SpawnFXParticles: FX_SpawnScripted plus the FXF_NoDistanceScale flag.
+void FX_SpawnScriptedParticles(FLevelLocals *level, const FFXParticleParams &params);

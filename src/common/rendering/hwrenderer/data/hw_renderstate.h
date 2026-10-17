@@ -210,7 +210,7 @@ struct StreamData
 
 	FVector4 uDetailParms;
 	FVector4 uNpotEmulation;
-	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint, z = parallax, w = particle time
+	FVector4 uMaterialParams;	// x = reflectivity, y = glossiness hint, z = parallax, w = particle time or -1 for sprite PBR
 	FVector4 uMaterialParams2;	// x = wetness, y = puddle coverage, z = rain ripples, w = G-buffer mode (EGBufferMode)
 	FVector4 uSurfaceParams;	// x = TAA reactive mask, y = fullbright emission, z, w unused
 	FVector4 uParticleParams;	// GPU particles and weather (hw_gpuparticles.h, hw_weather.h); x > 0 on other draws: soft fade distance
@@ -560,6 +560,16 @@ public:
 	int GetGBufferMode() const
 	{
 		return (int)mStreamData.uMaterialParams2.W;
+	}
+
+	// Negative w identifies authored sprite materials; x is normal strength,
+	// y is debug view, and z scales their direct light without changing world geometry.
+	void SetSpriteMaterialParams(float normalStrength, int debugView, float lightStrength)
+	{
+		mStreamData.uMaterialParams = { normalStrength, float(debugView), lightStrength, -1.f };
+		// A sprite does not inherit the preceding wall's wetness or puddles;
+		// the enclosing pass still owns its G-buffer cover/keep mode.
+		mStreamData.uMaterialParams2.X = mStreamData.uMaterialParams2.Y = mStreamData.uMaterialParams2.Z = 0;
 	}
 
 	// w > 0 switches the scene shaders to GPU particle mode; w is the current time

@@ -125,6 +125,7 @@ void AttachLight(AActor *self)
 	light->m_active = false;
 	light->visibletoplayer = true;
 	light->lighttype = (uint8_t)self->IntVar(NAME_lighttype);
+	light->UpdateVolumetricScale();
 	self->AttachedLights.Push(light);
 
 	// Disable postponed processing of dynamic light because its setup has been completed by this function
@@ -227,6 +228,8 @@ void FDynamicLight::Activate()
 	m_active = true;
 	m_currentRadius = float(GetIntensity());
 	m_tickCount = 0;
+	// Tick skips dormant lights, so pick up args changed while dormant.
+	UpdateVolumetricScale();
 
 	if (lighttype == PulseLight)
 	{
@@ -275,6 +278,9 @@ void FDynamicLight::Tick()
 
 	// Don't bother if the light won't be shown
 	if (!IsActive()) return;
+
+	// Follows args changed at run time (e.g. ACS SetThingSpecial).
+	UpdateVolumetricScale();
 
 	// I am doing this with a type field so that I can dynamically alter the type of light
 	// without having to create or maintain multiple objects.
@@ -363,6 +369,25 @@ void FDynamicLight::Tick()
 }
 
 
+
+
+//==========================================================================
+//
+// Volumetric scatter of map-placed light things. Point and spot lights
+// (types Point, including their additive, subtractive and attenuated
+// variants) don't use args[4], so it scales their volumetric scattering in
+// percent: 0 = 100% (the default), N > 0 = N% (up to 1000), N < 0 = none.
+// Pulse and flicker lights keep args[4] as their secondary intensity;
+// they, sector lights and lights attached through GLDEFS or A_AttachLight
+// (owned lights, whose args come from the light definition) always use 100%.
+//
+//==========================================================================
+
+void FDynamicLight::UpdateVolumetricScale()
+{
+	int percent = (!owned && lighttype == PointLight) ? pArgs[LIGHT_SECONDARY_INTENSITY] : 0;
+	volumetricScale = percent < 0 ? 0.f : percent == 0 ? 1.f : min(percent, 1000) / 100.f;
+}
 
 
 //==========================================================================

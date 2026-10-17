@@ -244,6 +244,7 @@ struct FDynamicLight
 
 	void Tick();
 	void UpdateLocation();
+	void UpdateVolumetricScale();
 	void AddLightNode(FSection *section, side_t *sidedef);
 	void LinkLight();
 	void UnlinkLight();
@@ -291,6 +292,10 @@ public:
 	// light had shadowed light shafts last frame (both for hysteresis).
 	float volumetricFade;
 	bool volumetricShadowed;
+	// Multiplier of this light's volumetric scattering. Map-placed point and
+	// spot light things take it from args[4] (see UpdateVolumetricScale);
+	// lights attached through GLDEFS or A_AttachLight keep 1.
+	float volumetricScale = 1.f;
 
 	FDynamicLightTouchLists touchlists;
 };

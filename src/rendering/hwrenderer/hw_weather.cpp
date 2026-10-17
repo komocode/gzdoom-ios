@@ -86,6 +86,17 @@ uint16_t ToHalf(float f)
 	return uint16_t(sign | (exponent << 10) | (mantissa >> 13));
 }
 
+// Inverse of ToHalf, which writes no denormals, infinities or NaNs.
+float FromHalf(uint16_t h)
+{
+	uint32_t bits = uint32_t(h & 0x8000) << 16;
+	int exponent = (h >> 10) & 0x1f;
+	if (exponent) bits |= uint32_t(exponent - 15 + 127) << 23 | uint32_t(h & 0x3ff) << 13;
+	float f;
+	memcpy(&f, &bits, 4);
+	return f;
+}
+
 bool HasSkyCeiling(sector_t *sec)
 {
 	FSectorPortal *portal = sec->ValidatePortal(sector_t::ceiling);
@@ -337,6 +348,52 @@ void Weather_SetUniforms(HWDrawInfo *di, HWViewpointUniforms &uniforms)
 	{
 		uniforms.mSceneDepthMap = { 0, 0, 0, 0 };
 	}
+}
+
+float Weather_RainAround(HWDrawInfo *di)
+{
+	FLevelLocals *level = di->Level;
+	if (level == nullptr) return 0.f;
+	FWeatherSettings w = EffectiveWeather(level);
+	if (w.Type != WEATHER_Rain || w.Density <= 0) return 0.f;
+	if (exposure.level != level || exposure.width <= 0 || exposure.texels.Size() == 0 || exposure.cellSector.Size() == 0) return w.Density;
+
+	// A point is in the rain if its cell is under open sky and no 3D floor
+	// roof (a stop height above the cell's floor) covers the camera's height.
+	const DVector3 &camera = di->Viewpoint.Pos;
+	auto inRain = [&](double x, double y)
+	{
+		int cx = std::clamp(int((x - exposure.originX) / exposure.cellSize), 0, exposure.width - 1);
+		int cy = std::clamp(int((y - exposure.originY) / exposure.cellSize), 0, exposure.height - 1);
+		int cell = cy * exposure.width + cx;
+		const uint16_t *texel = &exposure.texels[cell * 4];
+		if (texel[3] == 0) return false;
+		double cellX = exposure.originX + (cx + 0.5) * exposure.cellSize, cellY = exposure.originY + (cy + 0.5) * exposure.cellSize;
+		double floorZ = level->sectors[exposure.cellSector[cell]].floorplane.ZatPoint(cellX, cellY);
+		double stop = FromHalf(texel[0]);
+		// The tolerance covers the half float rounding of the stop height.
+		return stop <= floorZ + 1.0 + std::fabs(floorZ) / 1024.0 || stop <= camera.Z;
+	};
+
+	// 5x5 points 128 units apart around the camera. Under cover, only rain the
+	// camera can see counts (through a door or window), not a courtyard behind
+	// a wall: the BSP walk of this frame must have reached the point.
+	auto &sections = level->sections;
+	bool cameraOpen = inRain(camera.X, camera.Y);
+	int open = cameraOpen;
+	for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++)
+	{
+		if (i == 0 && j == 0) continue;
+		double x = camera.X + i * 128.0, y = camera.Y + j * 128.0;
+		if (!inRain(x, y)) continue;
+		if (!cameraOpen)
+		{
+			auto sub = level->PointInRenderSubsector(DVector2(x, y));
+			if (!sub || !sub->section || !(di->section_renderflags[sections.SectionIndex(sub->section)] & SSRF_PROCESSED)) continue;
+		}
+		open++;
+	}
+	return w.Density * open / 25.f;
 }
 
 void Weather_Flash(FLevelLocals *level, double strength, double duration)

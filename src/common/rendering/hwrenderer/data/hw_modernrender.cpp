@@ -54,6 +54,11 @@ FEATURE_CVAR(Bool, r_autonormal, false, "derive surface relief from textures for
 FEATURE_CVAR(Float, r_autonormal_strength, 1.f, "strength of derived surface relief")
 FEATURE_CVAR(Bool, r_specular, false, "specular highlights from dynamic lights on all surfaces")
 FEATURE_CVAR(Float, r_specular_strength, 1.f, "strength of derived specular highlights")
+FEATURE_CVAR(Bool, r_sprite_pbr, false, "per-pixel lighting for sprites with authored material maps; unmapped sprites keep classic lighting")
+FEATURE_CVAR(Bool, r_sprite_reflections, false, "local baked environment reflections on authored sprite materials")
+FEATURE_CVAR(Float, r_sprite_light_strength, 1.f, "direct-light intensity on authored sprite materials; 1 preserves the original response")
+FEATURE_CVAR(Float, r_sprite_normal_strength, 1.f, "strength of authored sprite surface normals")
+FEATURE_CVAR(Int, r_sprite_debug, 0, "sprite material view: 0 lit, 1 normals, 2 roughness, 3 metallic, 4 occlusion")
 FEATURE_CVAR(Bool, r_parallax, false, "parallax occlusion mapping from texture height estimates")
 FEATURE_CVAR(Int, r_ssr, 0, "screen-space reflections: 0 off, 1 liquids, wet and GLDEFS-reflective surfaces, 2 also glossy floors")
 FEATURE_CVAR(Float, r_ssr_strength, 1.f, "strength of screen-space reflections")
@@ -101,6 +106,8 @@ CUSTOM_CVARD(Bool, r_pixelart, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOI
 }
 FEATURE_CVAR(Int, r_weather_quality, 0, "map weather (rain, snow): 0 off, 1 normal, 2 high (distant rain sheets)")
 FEATURE_CVAR(Bool, r_softparticles, false, "fade particles, weather and soft sprites where they meet the scene (needs the G-buffer pass)")
+// Not part of the presets: lets the player ignore the maps' render overrides.
+CVARD(Bool, r_map_atmosphere, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG, "let maps force height fog and bloom and set reflection streaks (MAPINFO forceheightfog, forcebloom, ssrstretch)")
 
 int R_ModernFeatureMask(bool gbuffer)
 {
@@ -109,9 +116,12 @@ int R_ModernFeatureMask(bool gbuffer)
 	if (r_specular) mask |= RF_SPECULAR;
 	if (r_gi) mask |= RF_IRRADIANCE;
 	if (r_parallax) mask |= RF_PARALLAX;
+	if (r_sprite_pbr) mask |= RF_SPRITE_PBR;
+	if (r_sprite_pbr && r_sprite_reflections) mask |= RF_SPRITE_REFLECTIONS;
 	if (gbuffer && r_ssr > 0) mask |= RF_REFLECTIONS;
 	if (r_emissive) mask |= RF_HDR_EMISSIVE;
-	if (mask) mask |= RF_MODERN_LIGHT;
+	// Sprite switches must not change lighting on unmapped sprites or walls.
+	if (mask & ~(RF_SPRITE_PBR | RF_SPRITE_REFLECTIONS)) mask |= RF_MODERN_LIGHT;
 	return mask;
 }
 
@@ -157,6 +167,9 @@ void R_ApplyRenderPreset(int preset)
 	r_autonormal = p.autonormal;
 	r_specular = p.specular;
 	r_parallax = p.parallax;
+	r_sprite_pbr = preset > RP_CLASSIC;
+	r_sprite_reflections = preset >= RP_MEDIUM;
+	r_sprite_debug = 0;
 	r_ssr = p.ssr;
 	r_ssgi = p.ssgi;
 	r_taa = p.taa;
@@ -205,4 +218,33 @@ CCMD(r_presets)
 	Printf("r_preset 3: high - adds parallax, glossy floor reflections, soft shadows, TAA, eye adaptation, dense particles, distant rain\n");
 	Printf("r_preset 4: ultra - adds screen-space GI, full-res volumetrics, highest AO and shadow quality\n");
 	Printf("Last applied: %d%s\n", *r_preset, r_preset_auto ? " (chosen for this device)" : "");
+}
+
+// Per-map overrides, set every frame for the level being drawn. Kept apart
+// from the CVARs so they never end up in the user's ini.
+static bool mapForceBloom;
+static float mapSSRStretch;
+static bool deviceBloom = true;
+
+void R_SetMapAtmosphere(bool forceBloom, float ssrStretch)
+{
+	mapForceBloom = forceBloom;
+	mapSSRStretch = ssrStretch;
+}
+
+void R_SetDeviceBloom(bool allowed)
+{
+	deviceBloom = allowed;
+}
+
+bool R_BloomEnabled()
+{
+	// forcebloom overrides the player's gl_bloom, not the device policy that
+	// turned bloom off (weak GPU, low power, heat) while r_preset_auto is on.
+	return gl_bloom || (r_map_atmosphere && mapForceBloom && (deviceBloom || !r_preset_auto));
+}
+
+float R_SSRStretch()
+{
+	return r_map_atmosphere && mapSSRStretch > 0.f ? mapSSRStretch : (float)r_ssr_stretch;
 }

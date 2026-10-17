@@ -25,6 +25,7 @@ enum EFXFlags
 	FXF_Additive = 1,		// additive and emissive (sparks, embers, fire)
 	FXF_Unlit = 2,			// alpha blended but not lit by the scene
 	FXF_RestOnFloor = 4,	// land on the floor or 3D floor under the trajectory
+	FXF_NoDistanceScale = 8,	// no thinning with camera distance, for effects seen from afar
 };
 
 // Emits visual-only GPU particles continuously (Rate per second) and/or in

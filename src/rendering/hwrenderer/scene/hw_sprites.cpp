@@ -186,7 +186,7 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 	{
 		if (di->Level->HasDynamicLights && !di->isFullbrightScene() && !fullbright)
 		{
-			if (dynlightindex == -1)	// only set if we got no light buffer index. This covers all cases where sprite lighting is used.
+			if (dynlightindex == -1 && !spritePBR) // PBR sprites receive each light in the fragment shader.
 			{
 				float out[3] = {};
 				di->GetDynSpriteLight(gl_light_sprites ? actor : nullptr, gl_light_particles ? particle : nullptr, out);
@@ -245,8 +245,16 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 	}
 
 	uint32_t spritetype = actor? uint32_t(actor->renderflags & RF_SPRITETYPEMASK) : 0;
-	if (texture) state.SetMaterial(texture, UF_Sprite, (spritetype == RF_FACESPRITE) ? CTF_Expand : 0, clampmode, translation, OverrideShader);
-	else if (!modelframe) state.EnableTexture(false);
+	if (texture) state.SetMaterial(texture, UF_Sprite, ((spritetype == RF_FACESPRITE) ? CTF_Expand : 0) | (spritePBR ? CTF_SpritePBR : 0), clampmode, translation, OverrideShader);
+	if (spritePBR)
+	{
+		state.SetSpriteMaterialParams(clamp(float(r_sprite_normal_strength), 0.f, 3.f), clamp(int(r_sprite_debug), 0, 4), clamp(float(r_sprite_light_strength), 0.f, 6.f));
+		state.SetDynLight(0, 0, 0);
+		// Preserve authored light probes, without adding the old summed dynamic light.
+		if (auto probe = FindLightProbe(di->Level, actor->X(), actor->Y(), actor->Center()))
+			state.SetDynLight(probe->Red, probe->Green, probe->Blue);
+	}
+	if (!texture && !modelframe) state.EnableTexture(false);
 
 	// Opaque sprites (normal style, binary alpha) can write depth, so TAA
 	// reprojects them like geometry and screen-space reflections (which run
@@ -315,9 +323,6 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 
 		if (!modelframe)
 		{
-			state.SetNormal(0, 0, 0);
-
-
 			if (screen->BuffersArePersistent())
 			{
 				CreateVertices(di);
@@ -326,7 +331,8 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 			{
 				state.SetDepthBias(-1, -128);
 			}
-			state.SetLightIndex(-1);
+			state.SetNormal(spritePBR ? spriteNormal : FVector3(0, 0, 0));
+			state.SetLightIndex(spritePBR ? dynlightindex : -1);
 			state.Draw(DT_TriangleStrip, vertexindex, 4);
 
 			if (foglayer)
@@ -392,6 +398,12 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
 	state.SetAddColor(0);
 	state.EnableTexture(true);
 	state.SetDynLight(0, 0, 0);
+	if (spritePBR)
+	{
+		state.SetMaterialParams(0, 0);
+		state.SetNormal(0, 0, 0);
+		state.SetLightIndex(-1);
+	}
 }
 
 //==========================================================================
@@ -640,8 +652,28 @@ bool HWSprite::CalculateVertices(HWDrawInfo* di, FVector3* v, DVector3* vp)
 
 inline void HWSprite::PutSprite(HWDrawInfo *di, bool translucent)
 {
-	// That's a lot of checks...
-	if (modelframe && !modelframe->isVoxel && !(modelframeflags & MDL_NOPERPIXELLIGHTING) && RenderStyle.BlendOp != STYLEOP_Shadow && gl_light_sprites && di->Level->HasDynamicLights && !di->isFullbrightScene() && !fullbright)
+	// Missing authored maps must remain on the original sprite path. Also keep
+	// emissive, fuzz, stencil, particle and custom shader effects untouched.
+	spritePBR = r_sprite_pbr && screen->glslversion >= 3.3f && actor && !modelframe && texture
+		&& FMaterial::SupportsSpritePBR(texture)
+		&& texture->GetShaderIndex() < FIRST_USER_SHADER && OverrideShader == -1
+		&& !fullbright && !di->isFullbrightScene()
+		&& RenderStyle.BlendOp == STYLEOP_Add
+		&& (RenderStyle.DestAlpha == STYLEALPHA_Zero || RenderStyle.DestAlpha == STYLEALPHA_InvSrc)
+		&& !(RenderStyle.Flags & (STYLEF_ColorIsFixed | STYLEF_RedIsAlpha | STYLEF_InvertSource));
+	if (spritePBR && gl_light_sprites && di->Level->HasDynamicLights)
+	{
+		FVector3 vertices[4];
+		CalculateVertices(di, vertices, &di->Viewpoint.Pos);
+		auto center = (vertices[0] + vertices[3]) * 0.5f;
+		float radius = 0.f;
+		for (const auto &vertex : vertices)
+			radius = std::max(radius, float((vertex - center).Length()));
+		FVector4 bounds(center.X, center.Z, center.Y, radius);
+		hw_GetDynModelLight(actor, lightdata, &bounds);
+		dynlightindex = screen->mLights->UploadLights(lightdata);
+	}
+	else if (modelframe && !modelframe->isVoxel && !(modelframeflags & MDL_NOPERPIXELLIGHTING) && RenderStyle.BlendOp != STYLEOP_Shadow && gl_light_sprites && di->Level->HasDynamicLights && !di->isFullbrightScene() && !fullbright)
 	{
 		hw_GetDynModelLight(actor, lightdata);
 		dynlightindex = screen->mLights->UploadLights(lightdata);
@@ -669,6 +701,15 @@ void HWSprite::CreateVertices(HWDrawInfo *di)
 	{
 		FVector3 v[4];
 		polyoffset = CalculateVertices(di, v, &di->Viewpoint.Pos);
+		if (spritePBR)
+		{
+			spriteNormal = (v[1] - v[0]) ^ (v[2] - v[0]);
+			float normalLength = float(spriteNormal.Length());
+			if (normalLength > 1e-6f) spriteNormal *= 1.f / normalLength;
+			else spriteNormal = FVector3(0, 0, 1);
+			FVector3 toCamera(float(di->Viewpoint.Pos.X) - v[0].X, float(di->Viewpoint.Pos.Z) - v[0].Y, float(di->Viewpoint.Pos.Y) - v[0].Z);
+			if ((spriteNormal | toCamera) < 0.f) spriteNormal *= -1.f;
+		}
 		auto vert = screen->mVertexData->AllocVertices(4);
 		auto vp = vert.first;
 		vertexindex = vert.second;
