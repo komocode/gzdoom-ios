@@ -9,6 +9,7 @@
 #include "hw_renderstate.h"
 #include "zvulkan/vulkanbuilders.h"
 #include <list>
+#include <cstring>
 
 #define SHADER_MIN_REQUIRED_TEXTURE_LAYERS 11
 
@@ -58,11 +59,38 @@ struct PushConstants
 	int padding1, padding2, padding3;
 };
 
+// What a scene program's fragment shader is built from, kept so that its sun
+// variant (main.fp with SUN_LIGHT, hw_sun.h) can be compiled when a sunlit view
+// first draws with it. Shared with the Metal backend.
+struct SceneFragmentSource
+{
+	FString Name, FragLump, MaterialLump, LightLump, Defines;
+	bool HasMaterial, HasLight, AlphaTest, GBufferPass;
+
+	SceneFragmentSource(const char *name, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass)
+		: Name(name), FragLump(frag_lump), MaterialLump(material_lump ? material_lump : ""), LightLump(light_lump ? light_lump : ""),
+		Defines(defines ? defines : ""), HasMaterial(material_lump != nullptr), HasLight(light_lump != nullptr), AlphaTest(alphatest), GBufferPass(gbufferpass) {}
+
+	// Null for programs without sun shading (everything but main.fp).
+	static std::shared_ptr<SceneFragmentSource> ForSun(const char *name, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass)
+	{
+		if (!frag_lump || strcmp(frag_lump, "shaders/glsl/main.fp") != 0) return nullptr;
+		return std::make_shared<SceneFragmentSource>(name, frag_lump, material_lump, light_lump, defines, alphatest, gbufferpass);
+	}
+
+	FString SunDefines() const { return Defines + "\n#define SUN_LIGHT\n"; }
+	const char *Material() const { return HasMaterial ? MaterialLump.GetChars() : nullptr; }
+	const char *Light() const { return HasLight ? LightLump.GetChars() : nullptr; }
+};
+
 class VkShaderProgram
 {
 public:
 	std::unique_ptr<VulkanShader> vert;
 	std::unique_ptr<VulkanShader> frag;
+	// The fragment shader with the sun compiled in, made on first use (hw_sun.h).
+	std::unique_ptr<VulkanShader> fragSun;
+	std::shared_ptr<SceneFragmentSource> source;	// null without sun shading
 };
 
 class VkShaderManager
@@ -76,6 +104,13 @@ public:
 	VkShaderProgram *GetEffect(int effect, EPassType passType);
 	VkShaderProgram *Get(unsigned int eff, bool alphateston, EPassType passType);
 	bool CompileNextShader();
+
+	// The fragment shader of a program's sun variant, compiled on first use. Programs
+	// without sun shading return their own.
+	VulkanShader *GetSunFragment(VkShaderProgram *program);
+	// Compiles the sun variants of a pass's common scene programs and of these user
+	// shaders ahead of their first use.
+	void PrecacheSunShaders(EPassType passType, const TArray<int> &userShaders);
 
 	VkPPShader* GetVkShader(PPShader* shader);
 

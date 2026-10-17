@@ -422,6 +422,7 @@ MtlTextureManager::MtlTextureManager(MetalRenderDevice *fb) : fb(fb)
 	SetLightmap(1, 1, data);
 	SetIrradianceVolume(0, 0, 0, {});
 	SetWeatherMap(0, 0, {});
+	SetSunShadowMap(0, 0, nullptr);
 }
 
 MtlTextureManager::~MtlTextureManager()
@@ -477,6 +478,21 @@ void MtlTextureManager::SetWeatherMap(int width, int height, const TArray<uint16
 		return;
 	}
 	UploadHalfArray(WeatherMap, width, height, 1, rgbaHalfData.Data(), 4);
+}
+
+void MtlTextureManager::SetSunShadowMap(int width, int height, const float *depth)
+{
+	static const float none = 1e30f;
+	if (width <= 0 || height <= 0 || !depth)
+	{
+		width = height = 1;
+		depth = &none;
+	}
+	MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:width height:height mipmapped:NO];
+	desc.usage = MTLTextureUsageShaderRead;
+	desc.storageMode = fb->UploadStorageMode();
+	SunShadow.Texture = [fb->device newTextureWithDescriptor:desc];
+	[SunShadow.Texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:depth bytesPerRow:width * sizeof(float)];
 }
 
 void MtlTextureManager::UploadHalfArray(MtlTextureImage &image, int w, int h, int count, const uint16_t *src, int srcChannels)

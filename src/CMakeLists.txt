@@ -930,6 +930,7 @@ set (PCH_SOURCES
 	rendering/hwrenderer/hw_gpuparticles.cpp
 	rendering/hwrenderer/hw_volumetric.cpp
 	rendering/hwrenderer/hw_weather.cpp
+	rendering/hwrenderer/hw_sun.cpp
 	rendering/hwrenderer/hw_models.cpp
 	rendering/hwrenderer/hw_precache.cpp
 	rendering/hwrenderer/scene/hw_lighting.cpp
@@ -1037,6 +1038,7 @@ set (PCH_SOURCES
 	common/fonts/v_text.cpp	
 	common/textures/hw_ihwtexture.cpp
 	common/textures/hw_material.cpp
+	common/textures/sprite_materials.cpp
 	common/textures/bitmap.cpp
 	common/textures/m_png.cpp
 	common/textures/texture.cpp

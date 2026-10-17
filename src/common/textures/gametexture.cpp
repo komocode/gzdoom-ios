@@ -107,6 +107,11 @@ FGameTexture::~FGameTexture()
 		delete SoftwareTexture;
 		SoftwareTexture = nullptr;
 	}
+	for (auto& mat : SpriteMaterial)
+	{
+		delete mat;
+		mat = nullptr;
+	}
 	for (auto &mat : Material)
 	{
 		if (mat != nullptr) delete mat;
@@ -424,6 +429,10 @@ void FGameTexture::CleanHardwareData(bool full)
 {
 	if (full) Base->CleanHardwareTextures();
 	for (auto mat : Material) if (mat) mat->DeleteDescriptors();
+	for (auto mat : SpriteMaterial) if (mat) mat->DeleteDescriptors();
+	if (full && SpriteLayers)
+		for (auto tex : { SpriteLayers->Normal.get(), SpriteLayers->Specular.get(), SpriteLayers->Metallic.get(), SpriteLayers->Roughness.get(), SpriteLayers->AmbientOcclusion.get() })
+			if (tex) tex->CleanHardwareTextures();
 }
 
 

@@ -26,6 +26,7 @@ public:
 	void SetLightmap(int LMTextureSize, int LMTextureCount, const TArray<uint16_t>& LMTextureData);
 	void SetIrradianceVolume(int width, int height, int layers, const TArray<uint16_t>& rgbaHalfData);
 	void SetWeatherMap(int width, int height, const TArray<uint16_t>& rgbaHalfData);
+	void SetSunShadowMap(int width, int height, const float* depth);
 
 	VkTextureImage* GetTexture(const PPTextureType& type, PPTexture* tex);
 	VkFormat GetTextureFormat(PPTexture* texture);
@@ -43,6 +44,7 @@ public:
 	VkTextureImage Lightmap;
 	VkTextureImage Irradiance;
 	VkTextureImage WeatherMap;
+	VkTextureImage SunShadow;
 
 private:
 	void CreateNullTexture();

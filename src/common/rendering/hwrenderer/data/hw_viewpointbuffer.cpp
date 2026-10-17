@@ -76,6 +76,7 @@ int HWViewpointBuffer::Bind(FRenderState &di, unsigned int index)
 		mLastMappedIndex = index;
 		mBuffer->BindRange(&di, index * mBlockAlign, mBlockAlign);
 		di.EnableClipDistance(0, mClipPlaneInfo[index]);
+		di.SetSunShading(mSunInfo[index]);
 	}
 	return index;
 }
@@ -102,6 +103,7 @@ void HWViewpointBuffer::Set2D(FRenderState &di, int width, int height, int pll)
 	mBuffer->Unmap();
 
 	mClipPlaneInfo.Push(0);
+	mSunInfo.Push(false);
 
 	Bind(di, mUploadIndex++);
 }
@@ -114,6 +116,7 @@ int HWViewpointBuffer::SetViewpoint(FRenderState &di, HWViewpointUniforms *vp)
 	mBuffer->Unmap();
 
 	mClipPlaneInfo.Push(vp->mClipHeightDirection != 0.f || vp->mClipLine.X > -10000000.0f);
+	mSunInfo.Push(vp->mSunDir.W > 0.f);
 	return Bind(di, mUploadIndex++);
 }
 
@@ -123,6 +126,7 @@ void HWViewpointBuffer::Clear()
 
 	mUploadIndex = 0;
 	mClipPlaneInfo.Clear();
+	mSunInfo.Clear();
 
 	if (needNewPipeline)
 	{

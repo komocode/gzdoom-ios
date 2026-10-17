@@ -44,6 +44,7 @@ Apple GPUs:
 | Weather | `r_weather_quality` (1 normal, 2 + distant rain); MAPINFO and ZScript (below) | Rain or snow from a fixed set of drops in three nested layers around the camera plus splash slots, all computed in the vertex shader from the vertex index and the time: one draw and no CPU work per drop. Each layer is a world-space lattice that wraps around the camera. Drops fall only where a top-down sky exposure map (built once per level from sectors and 3D floors, updated for moving sectors) shows open sky, and end on the highest floor or 3D floor below it, where ripple rings and small splashes appear. Rain is a thin camera-facing streak along its velocity (wind included), lit additively by the sector light, the GI, nearby dynamic lights and lightning. Far drops keep a minimum on-screen width and fade instead, so distant layers read as sheets. | 98k vertices (123k at 2), thin streaks; 1 draw |
 | Soft particles | `r_softparticles` | GPU particles, weather and translucent sprites flagged `+SOFTPARTICLE` (smoke, fog and steam cards) fade out where they approach opaque geometry, using the half-resolution linear depth that the AO pass computes. Needs the G-buffer pass (SSAO, SSR, SSGI, volumetrics or the TAA reactive mask); with soft particles on, the AO pass computes the depth even when SSAO itself is off. | 1 texel fetch per fragment of those draws |
 | Lightning | existing lightning, `LevelLocals.WeatherFlash` | Each flash of the lightning thinker (or a scripted, visual-only flash) adds a brief sky light to every surface, particle and drop under open sky, after the light clamps so that it reaches the bloom. | 1 texel fetch per pixel while flashing |
+| Sun light and shadows | MAPINFO `sun`, `sunbounce`, `sunspecular`; `r_sun`, `r_sun_shadowsize`, `r_sun_weapon`, `r_sun_rebake`; `LevelLocals.SetSun`, `SetSunColor` | A directional light with shadows from a depth map that worker threads bake from the level mesh after the map loads. The scene shaders add diffuse and GGX sunlight after the light clamps, shadowed through a percentage-closer filter whose radius is the map's softness, and the GI bake bounces it. Only maps with a `sun` key have one. See [Sun](#sun). | None without a sun. With one: a 2–17 ms bake per direction, 5–9 shadow texel fetches per sunlit pixel (up to 64 on shadow edges) and a GGX term; 4–6 ms per frame at 3344×1882 on M1 Max |
 | Planar reflections | `gl_plane_reflection`, `gl_mirrors` | Already in GZDoom for mirrors and reflective planes; left as is. SSR adds reflections where maps don't author them. | existing |
 
 ### Volumetric light and fog
@@ -231,8 +232,8 @@ shaders. GPU frame time is shown with `stat gpu`.
 
 ## Level mesh
 
-The baked GI and the ray traced shadows share one mesh of the level
-(`src/rendering/hwrenderer/doom_levelmesh.cpp`).
+The baked GI, the ray traced shadows and the sun's shadow map share one mesh of
+the level (`src/rendering/hwrenderer/doom_levelmesh.cpp`).
 
 - **Built from the current state.** It is built on first use, after a savegame
   or hub snapshot has been restored, so restored doors, lifts and polyobjects
@@ -324,13 +325,173 @@ GPU particles from game code: fill an `FXParticleParams` (`count`, `color1` /
 and call `Level.SpawnFXParticles(p)`. Shapes are `FXS_Glow`, `FXS_Smoke`,
 `FXS_Chunk`, `FXS_Droplet`, `FXS_Ring` and `FXS_Mote`. Flags are
 `FXF_Additive` (additive and emissive), `FXF_Unlit` (alpha blended but
-emissive) and `FXF_RestOnFloor`. `FXEmitter` is an invisible actor that emits
+emissive), `FXF_RestOnFloor` and `FXF_NoDistanceScale`. New emissions are
+thinned with camera distance (full count up to 768 units, down to 15 %) and
+culled beyond 4096; `FXF_NoDistanceScale` keeps the full count and culls
+only beyond 8192, for effects that must read from afar, such as surf at the
+foot of distant cliffs. The per-tic, smoke and ring limits still apply.
+`FXEmitter` is an invisible actor that emits
 them continuously (`Rate` per second) and/or in bursts, optionally following
 its `master`; subclasses override `SetupParticles`. Examples: `FXTorchEmbers`,
 `FXDustMotes`, `FXSteamVent`, `FXSparkShower` and `FXSeaSpray`. Emitters use
 only the particles' own random generator, so they are netplay- and demo-safe;
 the particles themselves are not saved. `+SOFTPARTICLE` on a translucent
 sprite actor makes it fade into the scene like the GPU particles.
+
+## Map atmosphere
+
+Opt-in MAPINFO map keys for a map's look. Maps without them render and bake
+exactly as before.
+
+```
+gisky = "18 22 3a", 0.6              // GI sky radiance: colour, intensity
+gimoon = 35, 28, "9cb4ff", 2.5, 24   // GI moon: yaw, pitch, colour, intensity, exponent
+rainscatter = 1.5                    // volumetric scattering added by rain
+volumetricstrength = 0.4             // multiplies r_volumetric_strength on this map (0-8)
+ssrstretch = 4                       // replaces r_ssr_stretch on this map (> 0)
+forceheightfog                       // height fog even with r_heightfog off
+forcebloom                           // bloom even with gl_bloom off
+```
+
+- **`gisky`** replaces the sky radiance of the GI bake (normally the sky
+  texture's average colour) with colour / 255 × intensity (default 1). Sky
+  fog (`skyfog`) still blends it toward the fog colour.
+- **`gimoon`** adds a directional lobe to GI rays that hit the sky:
+  colour / 255 × intensity × max(0, ray · moon)^exponent, with the moon at
+  (cos pitch cos yaw, cos pitch sin yaw, sin pitch) in map space: yaw 0 is
+  east (+x), 90 north (+y), pitch is the elevation. The exponent (default 32)
+  is optional. Diffuse probes and reflection probes see the same sky. Lobes
+  sharper than a bake can sample (fewer than about four rays or reflection
+  texels inside the lobe) are widened with the same energy (linear energy for
+  reflections), so probes don't flicker between catching and missing the moon.
+  The bake summary (`developer`) reports both and the widened exponents.
+- **`rainscatter`** adds rainscatter × weather density to the scattering of
+  the volumetric medium while the map's weather is rain, so flood and spot
+  lights read as beams in the rain outdoors. It is scaled by how much of the
+  area within about 256 units of the camera is in the rain (open sky in the
+  sky exposure map, not under a 3D floor roof above the camera; under cover,
+  only rain seen through doors and windows counts) and eased in and out, and
+  starts at the right value on a new map or a loaded save. Thin air counts as
+  1, so `rainscatter = 1` at density 1 doubles the scattering; 0.5–2 suits
+  most maps (4 washes out a small courtyard). It does not absorb, unlike fog.
+  `stat volumetric` shows the current value.
+- **`volumetricstrength`** (0–8, default 1) multiplies the player's
+  `r_volumetric_strength` on this map, for maps whose many lights would
+  saturate the scattering (a night storm with hundreds of lamps) or that need
+  more of it. It scales only the light scattered by the volumetric pass,
+  including the glow of lights in fog and rain; the height fog's colour and
+  absorption are unchanged. 0 drops every light from the pass. It is a balance
+  value, not an override of a preference, so `r_map_atmosphere 0` keeps it.
+  `stat volumetric` shows it as "map strength". Single lights can be scaled
+  with their `arg4` (see [Light definitions](#light-definitions)).
+- **`forceheightfog`**, **`forcebloom`** and **`ssrstretch`** override the
+  player's `r_heightfog`, `gl_bloom` and `r_ssr_stretch` on this map without
+  changing the CVARs (nothing is written to the ini). Height fog still needs
+  `r_volumetric`, and bloom follows `r_bloom_modern`; with `r_preset_auto`,
+  `forcebloom` does not bring back bloom that the Apple quality policy turned
+  off (lowest GPU tiers, low power mode, heat). The flags take an optional
+  `= true` / `= false` (or on/off, yes/no, 1/0). `r_map_atmosphere 0`
+  (archived, default 1, "Map atmosphere overrides" in the Modern Rendering
+  menu) ignores these three.
+
+### Sun
+
+```
+sun = 200, 26, "ffd9a0", 3.5, 1.5    // yaw, elevation, colour, intensity[, softness]
+sunbounce = 1                        // GI bounce of the sun (0-16, default 1)
+sunspecular = 1                      // sun highlights (0-16, default 1)
+```
+
+- **`sun`** lights the map with a directional sun that casts shadows. Yaw and
+  elevation point toward the sun in map space, as for `gimoon`: yaw 0 is east
+  (+x), 90 north (+y), and the elevation (1–90) is in degrees above the
+  horizon. The colour is sRGB. The intensity (0–64) scales it in linear light:
+  at 1, a white sun adds as much light to a surface facing it as light level
+  255 gives it. The softness (0–8, default 1.5) is the radius of the shadow
+  filter in shadow map texels; 0 gives hard edges. The example is a low,
+  golden afternoon sun from the west-south-west.
+- **`sunbounce`** scales the sunlight that the GI bake bounces; 0 keeps the
+  sun out of the probes.
+- **`sunspecular`** scales the sun's highlights, including its glints on wet
+  surfaces.
+
+A map without a `sun` key has no sun and pays nothing for it: nothing is
+baked, and it draws with the same shaders as before (below).
+
+**Shading.** The scene shaders add albedo × colour × N·L × shadow plus a GGX
+highlight in linear light after the light clamps, like lightning, so the
+sector light level doesn't scale the sun and sunlit surfaces can reach the
+bloom. Fog covers it like any other light. N comes from the authored normal
+map or the relief normal (`r_autonormal`). The highlight follows the material
+roughness, or the authored specular and PBR maps, and sharpens on wet
+surfaces and puddles (`wetness`, `puddles`), where it is stretched toward the
+viewer like dynamic-light highlights. Authored sprite materials use their
+normal maps. Other sprites take the sun and its shadow at their position,
+with a mild wrap toward the camera because they are flat. The HUD weapon
+takes `r_sun_weapon` of the sun (default 0.35) while the player stands in
+sunlight, easing in and out of shadows. The sky and fullbright, additive,
+fuzzy and shadow-style sprites take no sun. The GI bake adds the sun at the
+ray hits that a shadow ray finds open to the sun, so sunlit ground bounces its
+colour into the shade.
+
+**Shadows.** One tic after the map loads, once static models are in place,
+worker threads render the [level mesh](#level-mesh) into an orthographic
+float depth map along the sunlight. Walls, ceilings, opaque 3D floors, masked
+mid textures (through their opaque texels) and static models cast shadows.
+Sector floors, sky surfaces, horizon and portal lines and sectors outside the
+playable map (3D floor control sectors, skybox areas) don't. Texels are square
+and at least one map unit; `r_sun_shadowsize` (512–8192, default 4096) is the
+longer side. The log reports `SUN: baked <width>x<height> in <n> ms`: on an M1
+Max, 2–3 ms for the 2568×1891 map of a small test level and 14–17 ms for the
+4096×1899 map of MAP01B (198k triangles). There is no sun until the first bake
+is done; a level with nothing to bake gets an unshadowed sun. Ceilings cast as
+if they were 2–48 units thick (more for softer shadows and lower suns), so that
+a low sun can't slip between a roof and the wall below it. As a result,
+openings in a roof without thickness shrink by about that thickness divided by
+tan(elevation). The map is static. Doors, lifts, polyobjects and moving models
+keep the shadows they had at the bake until `r_sun_rebake`, and actors don't
+cast (their projected sprite shadows remain). The shadow map takes width ×
+height × 4 bytes on the GPU, plus a CPU copy that answers whether the eye is
+in sunlight, at most 64 MiB each at 4096×4096.
+
+**Shaders.** The sun shading is compiled only into sun variants of the scene
+shaders (`SUN_LIGHT` in `main.fp`), which the backends use while a viewpoint
+with a sun is bound. All other drawing, and every map without a sun, keeps the
+plain shaders. Compiling the sun into them, even behind a branch that is never
+taken, slowed every map down on Apple GPUs. When a sunlit level loads, the
+variants of the common shaders (textured, material, warped and untextured,
+with and without alpha test, in the pass the main view uses) and of the user
+shaders on the level's walls and flats are compiled. On an M1 Max this takes
+0.35–0.4 s with a warm system shader cache and 0.9 s on the first run after an
+engine update (Metal builds them in parallel), and 0.15 s on Vulkan. Compiled
+variants are kept for the session. Others compile when first drawn.
+
+**Scripts.** `LevelLocals.SetSunColor(Color c, double intensity)` changes the
+colour and intensity at once. `LevelLocals.SetSun(double yaw, double elevation)`
+changes the direction and re-bakes the shadow map in the background, keeping
+the old shadows and direction until the new map is ready. Either one turns the
+sun on for a map without a `sun` key (softness 1.5; yaw 0 and elevation 45
+until `SetSun` is called). `GetSunColor()` and `GetSunIntensity()` (0 without
+a sun) read the settings back, and savegames keep them. The GI bounce keeps the
+sun of its own bake until `r_gi_rebake`.
+
+```
+Level.SetSun(180, 12);                          // low in the west
+Level.SetSunColor(Color(255, 150, 90), 4.0);    // evening orange
+```
+
+**CVARs.** `r_sun` (default on) draws the sun of maps that have one.
+`r_sun_shadowsize` sets the shadow map size and re-bakes when changed.
+`r_sun_weapon` (0–1, default 0.35) sets how much sun the HUD weapon takes.
+`r_sun_rebake` re-bakes with the level mesh rebuilt, so doors and lifts cast
+where they are now.
+
+**Limitations.** The OpenGL backends have no sun. Moving geometry needs
+`r_sun_rebake`, and actors don't cast. The volumetric pass doesn't scatter the
+sun, so there are no sun shafts. On a small test level at 3344×1882 on an M1
+Max, the sun adds 4–6 ms of GPU time per frame to about 16 ms without it
+(measured on a busy machine). About half of that comes from the larger shader
+variants rather than from the sun's own work.
 
 ## Light definitions
 
@@ -339,6 +500,29 @@ default: off, enabled from the Windows/Linux startup dialog, which the Apple
 port doesn't have). Without them, the stock games have no dynamic lights for
 the specular, volumetric and baked-GI passes to use. In E1M1 the GI bake goes
 from 0 to 49 static lights.
+
+Map-placed point and spot light things that don't animate (DoomEdNums 9800,
+9810, 9820, 9830, 9840, 9850, 9860, 9870: `PointLight`, `SpotLight` and their
+additive, subtractive and attenuated variants) don't use their fifth argument,
+so `arg4` sets the light's volumetric scattering in percent:
+
+| `arg4` | Volumetric scattering |
+| --- | --- |
+| 0 (default) | 100%, as before |
+| N > 0 | N% (capped at 1000), e.g. 25 for a quarter, 300 for three times |
+| N < 0 | none: the light is not a candidate for the pass at all |
+
+It scales both the light's rank among the 32 volumetric lights and its
+scattered colour; surface lighting, shadows and the GI bake are unchanged
+(subtractive lights never scatter). Vavoom lights (1502, 1503, 9825) follow the
+same rule. Hexen-format maps store thing arguments as bytes (0–255), so turning
+a light's scattering off with a negative value, or going above 255%, needs a
+UDMF map (or ACS at run time). Changes made at run time (ACS `SetThingSpecial`)
+apply on the next tic, or when the light is activated. Pulse, flicker and random
+flicker lights (9801, 9802, 9804 and the matching numbers in each family) keep
+`arg4` as their secondary intensity; they, sector lights (9803 and its matches,
+which don't read `arg4`) and lights attached through GLDEFS or `A_AttachLight`
+always scatter at 100%.
 
 ## Quality presets
 
@@ -538,7 +722,8 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
   `mMipBias`. The per-draw `StreamData` uses three spare `vec4`s:
   `uMaterialParams` (reflectivity, gloss, parallax, particle time),
   `uMaterialParams2` (wetness, puddles, rain ripples, G-buffer mode) and
-  `uSurfaceParams` (x = TAA reactive mask, y = fullbright emission);
+  `uSurfaceParams` (x = TAA reactive mask, y = fullbright emission, z = 1 keeps
+  the sun off the draw: `FRenderState::SetNoSun`);
   `uDetailParms.w` carries the material's GLDEFS `emissive` factor. The
   per-draw values are reset by `SetMaterial`.
 - The normal G-buffer's alpha is the TAA reactive mask (RGB10A2: 0, ⅓, ⅔, 1).
@@ -635,6 +820,107 @@ GZDoom needs a 64-bit address space, and Series 4–8 run `arm64_32`
   animation timing. At `r_upscale 0.6`, imps walking toward the camera leave a
   doubled (TAA) or smeared (MetalFX) trail with `r_taa_reactive 0` and none
   with it on. The neutral LUT matches no LUT apart from 8-bit rounding.
+- Sun (`src/rendering/hwrenderer/hw_sun.cpp`): `HWViewpointUniforms` gained
+  `mSunDir` (toward the sun; w = 1 while it shines), `mSunColor` (linear colour
+  × intensity; w = `sunspecular`), the light-space rows `mSunShadowU`,
+  `mSunShadowV` and `mSunShadowD` (in the shaders' x, height, y order; U and V
+  in texels), `mSunParams`
+  (map width and height, softness, map units per texel) and `mSunParams2` (HUD
+  mode, where the direction is in view space and x replaces the shadow lookup).
+  The shadow map is an R32F 2D texture at set 0, binding 6 (`SunShadowMap`,
+  Metal texture 17), read with `texelFetch`; without a sun a 1×1 placeholder
+  is bound. `HWViewpointBuffer` records which viewpoints have a sun, and
+  binding one sets `FRenderState::SetSunShading`, which selects the sun
+  variants: Metal swaps the program (`MtlShaderManager::GetSunVariant`), and
+  Vulkan swaps the fragment shader (`VkShaderManager::GetSunFragment`, keyed by
+  `VkPipelineKey::SunShading`). `DFrameBuffer::PrecacheSunShaders` compiles
+  them during the level load. On Metal, `MtlShaderManager::PrecacheSunVariants`
+  translates them on the main thread and has Metal build the libraries in
+  parallel (`newLibraryWithSource:options:completionHandler:`), then their
+  common pipelines join the background prewarm. The GI bake traces a shadow
+  ray toward the sun from each ray hit, through sky surfaces (`TRI_SKY`).
+- The sun was checked on the Mac (Metal, and Vulkan through MoltenVK, which
+  match) on a UDMF test level with a courtyard, a roofed porch and room, a
+  pillar, a fence, a truck model, sprites and wet floors and puddles, and on
+  MAP01B. Shadows show no leaks under roofs and no acne on sunlit walls, and
+  highlights sharpen on wet ground. Maps without a sun render as before.
 - Testing note: console commands passed with `+` on the command line run before
   the window exists, so the automatic preset overrides them. Use
   `+"wait 2; r_preset 3; …"` when scripting captures.
+
+## Authored sprite materials
+
+`r_sprite_pbr 1` enables per-pixel lighting for actor sprites that have authored
+normal, specular, metallic, roughness or occlusion maps. Sprites without maps
+retain their previous rendering. There is no runtime material inference or
+automatic normal generation for sprites. Fullbright, additive, fuzz, stencil,
+custom-shader and particle effects keep their previous treatment. Modern presets
+enable sprite lighting; Medium and above enable reflections. Existing saved
+configurations can enable the new controls under Modern Rendering / Sprite
+materials or with the console commands below.
+
+An optional material PK3 uses these paths for short sprite names:
+
+```
+materials/normalmaps/auto/SPRTA0.png
+materials/metallic/auto/SPRTA0.png
+materials/roughness/auto/SPRTA0.png
+materials/ao/auto/SPRTA0.png
+```
+
+Names must match each active frame and rotation. Full-path textures use the
+source path without its extension after the channel directory. Existing GLDEFS
+`material sprite` declarations also work. Author tangent normals with green +Y
+pointing upward (neutral RGB 128,128,255), scalar roughness/metallic/AO in red,
+and the original framing. The renderer aligns map borders and dimensions; AI
+output still needs pixel alignment checks before packaging. Authored specular
+maps retain their workflow. Partial maps use constant neutral defaults for
+missing channels, never material guesses from colour.
+
+- `r_sprite_pbr 0/1`: authored sprite lighting.
+- `r_sprite_reflections 0/1`: local environment reflections.
+- `r_sprite_light_strength 0..6`: direct-light intensity; 1 preserves the original response.
+  This scales diffuse and specular light together, retaining falloff, shadows,
+  material color and normal direction. Ambient and probe reflections keep their original intensity.
+- `r_sprite_normal_strength 0..3`: normal strength; 1 uses the authored map.
+- `r_sprite_debug 0..4`: lit, world normals, roughness, metallic, occlusion.
+- `r_gi_rebake`: refresh static bounce and reflection captures.
+
+Diffuse bounce follows the material normal. Direct lights use GGX highlights.
+Reflections use up to 128 spatially blended static room captures with four
+roughness levels, sampling room textures, sector lighting and static lights.
+These are low-resolution environment probes. Moving actors and changing doors
+are not captured live; rebaking refreshes the static snapshot. Translucent map
+geometry and unusual wall UV transforms remain approximate. Sprite materials do
+not create body geometry, change silhouettes, displace depth or cast volumetric
+self shadows.
+
+Asset workflow (requires Pillow):
+
+```sh
+python3 scripts/sprite_material_assets.py extract /path/to/game.pk3 --palette-wad /path/to/base.wad --out /path/to/extracted
+# Author normalmaps/, metallic/, roughness/ and ao/ atlas images at the exact
+# atlas size. Inspect every frame against the original and preserve placement.
+python3 scripts/sprite_material_assets.py pack --manifest /path/to/extracted/manifest.json --authored /path/to/authored --output /path/to/game-materials.pk3
+```
+
+The tool extracts and packs pixels; it does not invent materials. It records
+active frames and offsets, rejects incomplete channel sets by default, and
+writes a coverage receipt into the PK3. Source artwork and the authored pack
+belong with the supplied game, not the engine's generic asset archive.
+
+```sh
+python3 scripts/test_sprite_material_assets.py
+python3 scripts/tests/test_sprite_reflections.py
+python3 scripts/tests/validate_sprite_shaders.py
+python3 scripts/tests/sprite_lighting_scene.py /tmp/sprite-lighting-test
+```
+
+The shader validator checks that an unmapped sprite is byte-identical with
+sprite features enabled or disabled. Add `--preview-dir /tmp/sprite-preview`
+to export synthetic spatial-material previews without opening a game window.
+Those previews compare flat-normal PBR with normal-mapped PBR, not the classic
+renderer.
+
+The last command creates a synthetic analytic sphere and an unmapped control
+for renderer checks. This is test data, not production material generation.

@@ -15,6 +15,9 @@
 #include "printf.h"
 #include <zvulkan/vulkanbuilders.h>
 #include "spirv_msl.hpp"
+#include <algorithm>
+#include <condition_variable>
+#include <mutex>
 
 using namespace SPIRV_CROSS_NAMESPACE;
 
@@ -40,7 +43,7 @@ MtlShaderManager::MtlShaderManager(MetalRenderDevice *fb, bool raytracing) : fb(
 	}
 }
 
-id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout)
+void MtlShaderManager::Translate(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout, std::string &source, std::string &entry)
 {
 	@autoreleasepool
 	{
@@ -61,8 +64,6 @@ id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl,
 			I_FatalError("Metal: could not compile %s: %s", name, e.what());
 		}
 
-		std::string source;
-		std::string entry;
 		try
 		{
 			CompilerMSL msl(std::move(spirv));
@@ -96,6 +97,7 @@ id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl,
 				AddBinding(msl, model, 0, 3, 0, MTLTEX_IRRADIANCE, MTLTEX_IRRADIANCE);
 				AddBinding(msl, model, 0, 4, 0, MTLTEX_WEATHER, 0);
 				AddBinding(msl, model, 0, 5, 0, MTLTEX_SCENEDEPTH, 0);
+				AddBinding(msl, model, 0, 6, 0, MTLTEX_SUNSHADOW, 0);
 				AddBinding(msl, model, 0, 2, MTLBUF_ACCELERATION, 0, 0);
 			}
 			else
@@ -112,6 +114,15 @@ id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl,
 		{
 			I_FatalError("Metal: could not translate %s: %s", name, e.what());
 		}
+	}
+}
+
+id<MTLFunction> MtlShaderManager::Compile(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout)
+{
+	@autoreleasepool
+	{
+		std::string source, entry;
+		Translate(name, glsl, vertex, layout, source, entry);
 
 		MTLCompileOptions *options = [MTLCompileOptions new];
 		options.languageVersion = MTLLanguageVersion2_4;
@@ -138,7 +149,99 @@ MtlShaderProgram MtlShaderManager::LoadProgram(const char *name, const char *ver
 	FString frag = VkShaderManager::BuildFragmentSource(frag_lump, material_lump, light_lump, defines, alphatest, gbufferpass, false, raytracing, raytracing);
 	program.vert = Compile(name, vert, true, MtlShaderLayout::Scene);
 	program.frag = Compile(name, frag, false, MtlShaderLayout::Scene);
+	program.source = SceneFragmentSource::ForSun(name, frag_lump, material_lump, light_lump, defines, alphatest, gbufferpass);
 	return program;
+}
+
+MtlShaderProgram *MtlShaderManager::GetSunVariant(MtlShaderProgram *program)
+{
+	if (!program || !program->source)
+		return program;
+	if (!program->sun)
+	{
+		const SceneFragmentSource &src = *program->source;
+		FString frag = VkShaderManager::BuildFragmentSource(src.FragLump.GetChars(), src.Material(), src.Light(), src.SunDefines().GetChars(), src.AlphaTest, src.GBufferPass, false, mRaytracing, mRaytracing);
+		auto sun = std::make_shared<MtlShaderProgram>();
+		sun->vert = program->vert;
+		sun->frag = Compile(src.Name.GetChars(), frag, false, MtlShaderLayout::Scene);
+		program->sun = sun;
+	}
+	return program->sun.get();
+}
+
+// Building a library takes a few hundred milliseconds per sun variant until the
+// system shader cache has it. Here Metal builds them on its compiler threads, in
+// parallel with each other and with the translation of the next ones.
+void MtlShaderManager::PrecacheSunVariants(const std::vector<MtlShaderProgram*> &programs)
+{
+	struct Job
+	{
+		MtlShaderProgram *program = nullptr;
+		std::string source, entry;
+		id<MTLLibrary> library = nil;
+		NSError *error = nil;
+	};
+	struct Batch
+	{
+		std::mutex Mutex;
+		std::condition_variable Changed;
+		int Pending = 0;
+	};
+	auto batch = std::make_shared<Batch>();
+	std::vector<std::shared_ptr<Job>> jobs;
+
+	@autoreleasepool
+	{
+		MTLCompileOptions *options = [MTLCompileOptions new];
+		options.languageVersion = MTLLanguageVersion2_4;
+		for (MtlShaderProgram *program : programs)
+		{
+			if (!program || !program->source || program->sun)
+				continue;
+			if (std::any_of(jobs.begin(), jobs.end(), [=](const std::shared_ptr<Job> &job) { return job->program == program; }))
+				continue;
+			const SceneFragmentSource &src = *program->source;
+			FString frag = VkShaderManager::BuildFragmentSource(src.FragLump.GetChars(), src.Material(), src.Light(), src.SunDefines().GetChars(), src.AlphaTest, src.GBufferPass, false, mRaytracing, mRaytracing);
+			auto job = std::make_shared<Job>();
+			job->program = program;
+			Translate(src.Name.GetChars(), frag, false, MtlShaderLayout::Scene, job->source, job->entry);
+			jobs.push_back(job);
+			{
+				std::lock_guard<std::mutex> lock(batch->Mutex);
+				batch->Pending++;
+			}
+			[fb->device newLibraryWithSource:@(job->source.c_str()) options:options completionHandler:^(id<MTLLibrary> library, NSError *error) {
+				std::lock_guard<std::mutex> lock(batch->Mutex);
+				job->library = library;
+				job->error = error;
+				batch->Pending--;
+				batch->Changed.notify_all();
+			}];
+		}
+
+		{
+			std::unique_lock<std::mutex> lock(batch->Mutex);
+			batch->Changed.wait(lock, [&] { return batch->Pending == 0; });
+		}
+
+		for (const auto &job : jobs)
+		{
+			const char *name = job->program->source->Name.GetChars();
+			if (!job->library)
+			{
+				Printf(PRINT_LOG, "%s\n", job->source.c_str());
+				I_FatalError("Metal: could not build %s: %s", name, job->error.localizedDescription.UTF8String);
+			}
+			id<MTLFunction> function = [job->library newFunctionWithName:@(job->entry.c_str())];
+			if (!function)
+				I_FatalError("Metal: %s has no entry point %s", name, job->entry.c_str());
+			function.label = @(name);
+			auto sun = std::make_shared<MtlShaderProgram>();
+			sun->vert = job->program->vert;
+			sun->frag = function;
+			job->program->sun = sun;
+		}
+	}
 }
 
 bool MtlShaderManager::CompileNextShader()

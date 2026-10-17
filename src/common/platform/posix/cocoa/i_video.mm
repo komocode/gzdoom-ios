@@ -153,7 +153,11 @@ namespace
 
 - (void)setTitle:(NSString*)title
 {
-	m_title = title;
+	// Display-mode changes reuse the title after the caller's autorelease
+	// pool drains, so the window must own its cached string.
+	NSString* const retainedTitle = [title copy];
+	[m_title release];
+	m_title = retainedTitle;
 
 	[self updateTitle];
 }
@@ -162,10 +166,16 @@ namespace
 {
 	if (nil == m_title)
 	{
-		m_title = [NSString stringWithFormat:@"%s %s", GAMENAME, GetVersionString()];
+		m_title = [[NSString alloc] initWithFormat:@"%s %s", GAMENAME, GetVersionString()];
 	}
 
 	[super setTitle:m_title];
+}
+
+- (void)dealloc
+{
+	[m_title release];
+	[super dealloc];
 }
 
 - (void)frameDidChange:(NSNotification*)notification

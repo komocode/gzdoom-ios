@@ -21,6 +21,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 class MetalRenderDevice;
@@ -49,7 +50,8 @@ enum
 	MTLTEX_IRRADIANCE = 14,
 	MTLTEX_WEATHER = 15,		// sky exposure map, read without a sampler
 	MTLTEX_SCENEDEPTH = 16,		// half-res linear depth for soft particles, read without a sampler
-	MTLTEX_SCENE_COUNT = 17,
+	MTLTEX_SUNSHADOW = 17,		// sun shadow map (hw_sun.h), read without a sampler
+	MTLTEX_SCENE_COUNT = 18,
 
 	// Postprocess shaders, fragment stage
 	MTLBUF_PP_UNIFORMS = 0,
@@ -301,6 +303,7 @@ public:
 	void SetLightmap(int size, int count, const TArray<uint16_t> &data);
 	void SetIrradianceVolume(int width, int height, int layers, const TArray<uint16_t> &rgbaHalfData);
 	void SetWeatherMap(int width, int height, const TArray<uint16_t> &rgbaHalfData);
+	void SetSunShadowMap(int width, int height, const float *depth);
 
 	MtlTextureImage *GetTexture(PPTextureType type, PPTexture *tex);
 	MTLPixelFormat GetTextureFormat(PPTexture *tex);
@@ -315,6 +318,7 @@ public:
 	MtlTextureImage Lightmap;
 	MtlTextureImage Irradiance;
 	MtlTextureImage WeatherMap;
+	MtlTextureImage SunShadow;
 	id<MTLTexture> SceneDepth = nil;	// set after AmbientOccludeScene for the rest of the frame
 
 private:
@@ -393,10 +397,16 @@ private:
 /////////////////////////////////////////////////////////////////////////////
 // Shaders
 
+struct SceneFragmentSource;
+
 struct MtlShaderProgram
 {
 	id<MTLFunction> vert = nil;
 	id<MTLFunction> frag = nil;
+	// The program with the sun compiled in (hw_sun.h), made when first needed, and
+	// what its fragment shader is built from. Both are null without sun shading.
+	std::shared_ptr<MtlShaderProgram> sun;
+	std::shared_ptr<SceneFragmentSource> source;
 };
 
 class MtlPPShader : public PPShaderBackend
@@ -419,12 +429,21 @@ public:
 	MtlShaderProgram *Get(unsigned int eff, bool alphateston, EPassType passType);
 	bool CompileNextShader();
 
+	// The sun variant of a scene program, compiled on first use. Programs without
+	// sun shading return themselves.
+	MtlShaderProgram *GetSunVariant(MtlShaderProgram *program);
+	// Compiles the sun variants of these programs together, Metal building their
+	// libraries in parallel on its compiler threads, and waits for them.
+	void PrecacheSunVariants(const std::vector<MtlShaderProgram*> &programs);
+
 	MtlPPShader *GetPPShader(PPShader *shader);
 
 	// GLSL -> SPIR-V (glslang) -> MSL (SPIRV-Cross) -> MTLFunction
 	id<MTLFunction> Compile(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout);
 
 private:
+	// The MSL source and its entry point, the first part of Compile.
+	void Translate(const char *name, const FString &glsl, bool vertex, MtlShaderLayout layout, std::string &source, std::string &entry);
 	MtlShaderProgram LoadProgram(const char *name, const char *vert_lump, const char *frag_lump, const char *material_lump, const char *light_lump, const char *defines, bool alphatest, bool gbufferpass);
 
 	MetalRenderDevice *fb = nullptr;

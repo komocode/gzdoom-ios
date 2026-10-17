@@ -14,6 +14,7 @@ enum ECreateTexBufferFlags
 	CTF_CreateMask = 3,		// Flags that are relevant for hardware texture creation.
 	CTF_Indexed = 4,		// Tell the backend to create an indexed texture.
 	CTF_CheckOnly = 8,		// Only runs the code to get a content ID but does not create a texture. Can be used to access a caching system for the hardware textures.
+	CTF_SpritePBR = 32,	// material-only request; stripped before hardware texture creation
 	CTF_ProcessData = 16,	// run postprocessing on the generated buffer. This is only needed when using the data for a hardware texture.
 };
 

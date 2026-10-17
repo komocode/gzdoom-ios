@@ -54,6 +54,7 @@ void IOS_UpdateHardware()
     gl_fxaa = settings.fxaa;
     gl_ssao = settings.ssao;
     gl_bloom = settings.bloom;
+    R_SetDeviceBloom(settings.bloom); // MAPINFO forcebloom must not undo this either
     gl_texture_filter_anisotropic = settings.anisotropy;
     vid_scalemode = 0;
     bool linear = !r_pixelart;

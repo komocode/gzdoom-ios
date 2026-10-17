@@ -28,6 +28,7 @@ class FMaterial
 	int mShaderIndex;
 	int mLayerFlags = 0;
 	int mScaleFlags;
+	bool mSpritePBR = false;
 
 public:
 	static void SetLayerCallback(IHardwareTexture* (*layercallback)(int layer, int translation));
@@ -39,6 +40,8 @@ public:
 	int GetLayerFlags() const { return mLayerFlags; }
 	int GetShaderIndex() const { return mShaderIndex; }
 	int GetScaleFlags() const { return mScaleFlags; }
+	bool IsSpritePBR() const { return mSpritePBR; }
+	static bool SupportsSpritePBR(FGameTexture* tex);
 	virtual void DeleteDescriptors() { }
 	FVector2 GetDetailScale() const
 	{

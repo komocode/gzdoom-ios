@@ -778,6 +778,12 @@ public:
 	PalEntry	heightfogcolor;
 	DVector2	heightfogwind;
 
+	// Opt-in GI sky/moon, rain scattering and render overrides, from MAPINFO.
+	FMapAtmosphereInfo atmosphere;
+
+	// Directional sun (hw_sun.h), from MAPINFO; scripts may change it.
+	FSunSettings sun;
+
 	FGlobalDLightLists lightlists;
 
 	FDynamicLight *lights;

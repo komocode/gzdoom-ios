@@ -28,6 +28,7 @@
 #include "hw_irradiance.h"
 #include "hw_gpuparticles.h"
 #include "hw_weather.h"
+#include "hw_sun.h"
 #include "hw_modernrender.h"
 #include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "a_sharedglobal.h"
@@ -192,6 +193,7 @@ void HWDrawInfo::StartScene(FRenderViewpoint &parentvp, HWViewpointUniforms *uni
 		GI_SetUniforms(VPUniforms);
 		if (VPUniforms.mGISize.W == 0) VPUniforms.mRenderFeatures &= ~RF_IRRADIANCE;
 		Weather_SetUniforms(this, VPUniforms);
+		Sun_SetUniforms(Level, VPUniforms);
 	}
 	mClipper->SetViewpoint(Viewpoint);
 	vClipper->SetViewpoint(Viewpoint);
@@ -971,6 +973,7 @@ void HWDrawInfo::DrawEndScene2D(sector_t * viewsector, FRenderState &state)
 	auto vrmode = VRMode::GetVRMode(true);
 
 	HWViewpointUniforms vp = VPUniforms;
+	Sun_SetHUDUniforms(vp, VPUniforms.mViewMatrix, Viewpoint.Pos);
 	vp.mViewMatrix.loadIdentity();
 	vp.mProjectionMatrix = vrmode->GetHUDSpriteProjection();
 	screen->mViewpoints->SetViewpoint(state, &vp);

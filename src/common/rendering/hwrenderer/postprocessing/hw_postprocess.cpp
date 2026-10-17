@@ -32,6 +32,8 @@
 #include "printf.h"
 #include <cmath>
 
+EXTERN_CVAR(Int, r_gpuparticles)
+
 Postprocess hw_postprocess;
 
 PPResource *PPResource::First = nullptr;
@@ -79,8 +81,8 @@ void PPBloom::RenderBloom(PPRenderState *renderstate, int sceneWidth, int sceneH
 {
 	HasModernResult = false;
 
-	// Only bloom things if enabled and no special fixed light mode is active
-	if (!gl_bloom || fixedcm != CM_DEFAULT || gl_ssao_debug || sceneWidth <= 0 || sceneHeight <= 0)
+	// Only bloom things if enabled (gl_bloom or the map's forcebloom) and no special fixed light mode is active
+	if (!R_BloomEnabled() || fixedcm != CM_DEFAULT || gl_ssao_debug || sceneWidth <= 0 || sceneHeight <= 0)
 	{
 		return;
 	}
@@ -443,7 +445,7 @@ void PPCameraExposure::Render(PPRenderState *renderstate, int sceneWidth, int sc
 {
 	// The classic bloom scales its threshold by the camera exposure; eye
 	// adaptation is independent of bloom and is applied by the tone mapper.
-	bool classic = gl_bloom && !r_bloom_modern;
+	bool classic = R_BloomEnabled() && !r_bloom_modern;
 	bool adapt = r_autoexposure && sceneWidth > 0 && sceneHeight > 0;
 	if (!adapt)
 	{
@@ -1044,7 +1046,10 @@ void PPAmbientOcclusion::UpdateTextures(int width, int height)
 bool PPAmbientOcclusion::GBufferNeeded()
 {
 	// TAA reads its reactive mask from the normal G-buffer's alpha.
-	return gl_ssao != 0 || hw_postprocess.sceneEffects.Active() || (r_taa_reactive && hw_postprocess.taa.Enabled());
+	// Analytic concrete volumes need opaque depth even with SSAO and soft
+	// sprite fading disabled. Only backends that expose that depth use them.
+	const bool volumeDepth = r_gpuparticles >= 3 && screen->SceneDepthReadable();
+	return volumeDepth || gl_ssao != 0 || hw_postprocess.sceneEffects.Active() || (r_taa_reactive && hw_postprocess.taa.Enabled());
 }
 
 void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneWidth, int sceneHeight)
@@ -1054,7 +1059,7 @@ void PPAmbientOcclusion::Render(PPRenderState *renderstate, float m5, int sceneW
 		return;
 	}
 
-	if (gl_ssao == 0 && !hw_postprocess.sceneEffects.Active() && !r_softparticles)
+	if (gl_ssao == 0 && !hw_postprocess.sceneEffects.Active() && !r_softparticles && !(r_gpuparticles >= 3 && screen->SceneDepthReadable()))
 	{
 		return; // the G-buffer is only there for the TAA reactive mask
 	}
@@ -1690,8 +1695,9 @@ void PPSceneEffects::RenderVolumetrics(PPRenderState *renderstate, const FVector
 	u.LinearizeDepthB = max(1.0f / screen->GetZNear(), 1.e-8f);
 	u.InverseDepthRangeA = 1.0f;
 	u.InverseDepthRangeB = 0.0f;
-	u.Strength = r_volumetric_strength;
+	u.Strength = r_volumetric_strength * max(Fog.Strength, 0.0f);
 	u.FogScatter = max((float)r_volumetric_fogscatter, 0.0f);
+	u.RainScatter = max(Fog.RainScatter, 0.0f);
 	u.MaxDistance = 16384.0f;
 	// A new sample offset every frame for TAA to integrate; fixed without it.
 	u.JitterOffset = r_taa ? (FrameIndex++ & 63) * 0.618034f : 0.0f;
@@ -1939,7 +1945,7 @@ void PPSceneEffects::RenderReflections(PPRenderState *renderstate, float m5, int
 	u.Thickness = 24.0f;
 	u.Steps = r_ssr > 1 ? 40 : 24;
 	u.SampleIndex = 0;
-	u.Stretch = clamp((float)r_ssr_stretch, 0.0f, 8.0f);
+	u.Stretch = clamp(R_SSRStretch(), 0.0f, 8.0f);	// r_ssr_stretch or the map's ssrstretch
 	u.Jitter = hw_postprocess.taa.Enabled() ? (float)ReflectFrame : 0.0f;
 	u.FarDepth = screen->GetZFar();
 	u.LevelHeight = (float)height;

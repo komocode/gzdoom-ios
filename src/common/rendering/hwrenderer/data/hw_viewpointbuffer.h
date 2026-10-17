@@ -18,6 +18,7 @@ class HWViewpointBuffer
 	unsigned int mLastMappedIndex;
 	unsigned int mByteSize;
 	TArray<bool> mClipPlaneInfo;
+	TArray<bool> mSunInfo;	// viewpoints with a sun (hw_sun.h) use the sun shader variants
 
 	unsigned int mBlockSize;
 

@@ -10,6 +10,8 @@ final class WatchRenderer: ObservableObject {
     private var lastFrame: UInt64 = 0
 
     let games: [URL] = {
+        let standalone = Bundle.main.bundleURL.appendingPathComponent("standalone.ipk3")
+        if FileManager.default.fileExists(atPath: standalone.path) { return [standalone] }
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Games", isDirectory: true)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Games", isDirectory: true)
@@ -87,7 +89,8 @@ struct GZDoomWatchApp: App {
             }
             .task {
                 GZDWatchSetActive(scenePhase == .active)
-                if ProcessInfo.processInfo.arguments.contains("-watch-autostart"), let game = renderer.games.first {
+                if let game = renderer.games.first,
+                   game.lastPathComponent == "standalone.ipk3" || ProcessInfo.processInfo.arguments.contains("-watch-autostart") {
                     renderer.start(game)
                 }
             }

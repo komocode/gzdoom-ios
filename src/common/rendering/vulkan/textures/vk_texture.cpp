@@ -34,6 +34,7 @@ VkTextureManager::VkTextureManager(VulkanRenderDevice* fb) : fb(fb)
 	CreateLightmap();
 	SetIrradianceVolume(0, 0, 0, {});
 	SetWeatherMap(0, 0, {});
+	SetSunShadowMap(0, 0, nullptr);
 }
 
 VkTextureManager::~VkTextureManager()
@@ -218,6 +219,54 @@ void VkTextureManager::SetWeatherMap(int width, int height, const TArray<uint16_
 		return;
 	}
 	UploadHalfArray(WeatherMap, width, height, 1, rgbaHalfData.Data(), 4, "VkRenderBuffers.WeatherMap");
+}
+
+void VkTextureManager::SetSunShadowMap(int width, int height, const float* depth)
+{
+	static const float none = 1e30f;
+	if (width <= 0 || height <= 0 || !depth)
+	{
+		width = height = 1;
+		depth = &none;
+	}
+
+	SunShadow.Reset(fb);
+	SunShadow.Image = ImageBuilder()
+		.Size(width, height)
+		.Format(VK_FORMAT_R32_SFLOAT)
+		.Usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+		.DebugName("VkRenderBuffers.SunShadow")
+		.Create(fb->device.get());
+	SunShadow.View = ImageViewBuilder()
+		.Image(SunShadow.Image.get(), VK_FORMAT_R32_SFLOAT)
+		.DebugName("VkRenderBuffers.SunShadow")
+		.Create(fb->device.get());
+
+	size_t totalSize = size_t(width) * height * sizeof(float);
+	auto stagingBuffer = BufferBuilder()
+		.Size(totalSize)
+		.Usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
+		.DebugName("VkRenderBuffers.SunShadowStaging")
+		.Create(fb->device.get());
+	void* data = stagingBuffer->Map(0, totalSize);
+	memcpy(data, depth, totalSize);
+	stagingBuffer->Unmap();
+
+	auto cmdbuffer = fb->GetCommands()->GetTransferCommands();
+	VkImageTransition()
+		.AddImage(&SunShadow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true)
+		.Execute(cmdbuffer);
+	VkBufferImageCopy region = {};
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.layerCount = 1;
+	region.imageExtent.depth = 1;
+	region.imageExtent.width = width;
+	region.imageExtent.height = height;
+	cmdbuffer->copyBufferToImage(stagingBuffer->buffer, SunShadow.Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	VkImageTransition()
+		.AddImage(&SunShadow, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
+		.Execute(cmdbuffer);
+	fb->GetCommands()->TransferDeleteList->Add(std::move(stagingBuffer));
 }
 
 void VkTextureManager::UploadHalfArray(VkTextureImage& image, int w, int h, int count, const uint16_t* src, int srcChannels, const char* name)

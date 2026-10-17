@@ -1849,6 +1849,63 @@ DEFINE_ACTION_FUNCTION_NATIVE(_Sector, SetXOffset, SetXOffset)
 	 return 0;
  }
 
+ // Directional sun (hw_sun.h); savegames keep the settings. A map without a
+ // MAPINFO sun gets one with the default softness when a script sets it.
+ static void SetSunColor(FLevelLocals *self, int color, double intensity)
+ {
+	 self->sun.Color = uint32_t(color) & 0xffffff;
+	 self->sun.Intensity = (float)clamp(intensity, 0., 64.);
+	 self->sun.Enabled = true;
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SetSunColor, SetSunColor)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 PARAM_COLOR(color);
+	 PARAM_FLOAT(intensity);
+	 SetSunColor(self, color, intensity);
+	 return 0;
+ }
+
+ // A new direction keeps the current shadows until the shadow map is re-baked.
+ static void SetSun(FLevelLocals *self, double yaw, double elevation)
+ {
+	 self->sun.Yaw = (float)yaw;
+	 self->sun.Elevation = (float)clamp(elevation, 1., 90.);
+	 self->sun.Enabled = true;
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, SetSun, SetSun)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 PARAM_FLOAT(yaw);
+	 PARAM_FLOAT(elevation);
+	 SetSun(self, yaw, elevation);
+	 return 0;
+ }
+
+ static int GetSunColor(FLevelLocals *self)
+ {
+	 return int(self->sun.Color | 0xff000000);
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, GetSunColor, GetSunColor)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 ACTION_RETURN_INT(GetSunColor(self));
+ }
+
+ static double GetSunIntensity(FLevelLocals *self)
+ {
+	 return self->sun.Enabled ? self->sun.Intensity : 0.;
+ }
+
+ DEFINE_ACTION_FUNCTION_NATIVE(FLevelLocals, GetSunIntensity, GetSunIntensity)
+ {
+	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);
+	 ACTION_RETURN_FLOAT(GetSunIntensity(self));
+ }
+
  DEFINE_ACTION_FUNCTION(FLevelLocals, StartIntermission)
  {
 	 PARAM_SELF_STRUCT_PROLOGUE(FLevelLocals);

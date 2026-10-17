@@ -5,6 +5,7 @@
 
 #include "hw_volumetric.h"
 #include "hw_modernrender.h"
+#include "hw_weather.h"
 #include "hw_cvars.h"
 #include "hwrenderer/postprocessing/hw_postprocess.h"
 #include "scene/hw_drawinfo.h"
@@ -35,7 +36,7 @@ const TArray<VolumetricLight> &R_GetVolumetricLights()
 }
 
 static int VolumetricCandidates;
-static float VolumetricFogDensity, VolumetricSectorFog;
+static float VolumetricFogDensity, VolumetricSectorFog, VolumetricRainScatter, VolumetricMapStrength = 1.0f;
 
 ADD_STAT(volumetric)
 {
@@ -46,9 +47,9 @@ ADD_STAT(volumetric)
 		if (light.SpotDir.LengthSquared() > 0) spots++;
 	}
 	FString out;
-	out.Format("Volumetric lights: %d of %d candidates, %d shadowed%s, %d spot\nHeight fog %.2f, sector fog %.2f per 1000 units",
+	out.Format("Volumetric lights: %d of %d candidates, %d shadowed%s, %d spot\nHeight fog %.2f, sector fog %.2f per 1000 units, rain scatter %.2f, map strength %.2f",
 		VolumetricLights.Size(), VolumetricCandidates, shadowed, hw_postprocess.sceneEffects.VolumetricRayQuery() ? " (ray traced)" : "", spots,
-		VolumetricFogDensity * 1000.0f, VolumetricSectorFog * 1000.0f);
+		VolumetricFogDensity * 1000.0f, VolumetricSectorFog * 1000.0f, VolumetricRainScatter, VolumetricMapStrength);
 	return out;
 }
 
@@ -87,7 +88,8 @@ static VolumetricFog CollectFog(HWDrawInfo *di)
 	VolumetricFog fog;
 	auto Level = di->Level;
 	fog.SectorDensity = CameraSectorFog(di);
-	if (!r_heightfog)
+	// MAPINFO forceheightfog draws the map's fog even when the user turned r_heightfog off.
+	if (!r_heightfog && !(r_map_atmosphere && Level->atmosphere.ForceHeightFog))
 		return fog;
 
 	double density = Level->heightfogdensity;
@@ -116,6 +118,34 @@ static VolumetricFog CollectFog(HWDrawInfo *di)
 	fog.NoiseScale = 1.0f / 160.0f;
 	fog.NoiseOffset = { float(-Level->heightfogwind.X * time * fog.NoiseScale), float(time * 0.08), float(-Level->heightfogwind.Y * time * fog.NoiseScale) };
 	return fog;
+}
+
+//-----------------------------------------------------------------------------
+//
+// MAPINFO rainscatter: rain makes the air scatter more, so spot and flood
+// lights read as beams. Scaled by the rain density and the open sky around
+// the camera, eased over about half a second when walking in or out.
+//
+//-----------------------------------------------------------------------------
+
+static float RainScatter(HWDrawInfo *di, float dt)
+{
+	static float current = 0.0f;
+	static int lastMaptime = -1;
+	auto Level = di->Level;
+	// The level object is reused from map to map, so a new map, a restart or
+	// a loaded save shows as the map time going back or jumping ahead: start
+	// at the new value there instead of easing from the old one.
+	int maptime = Level->maptime;
+	bool snap = dt <= 0.0f || lastMaptime < 0 || maptime < lastMaptime || maptime > lastMaptime + TICRATE;
+	lastMaptime = maptime;
+	float amount = Level->atmosphere.RainScatter;
+	if (amount <= 0.0f)
+		return current = 0.0f;
+	float target = amount * Weather_RainAround(di);
+	if (snap) current = target;
+	else current += (target - current) * (1.0f - expf(-dt * 4.0f));
+	return current;
 }
 
 //-----------------------------------------------------------------------------
@@ -159,8 +189,13 @@ void R_CollectVolumetrics(HWDrawInfo *di)
 	}
 
 	VolumetricFog fog = CollectFog(di);
+	fog.RainScatter = RainScatter(di, dt);
+	// MAPINFO volumetricstrength scales the in-scattered light, not the fog.
+	fog.Strength = Level->atmosphere.VolumetricStrength;
 	VolumetricFogDensity = fog.Density;
 	VolumetricSectorFog = fog.SectorDensity;
+	VolumetricRainScatter = fog.RainScatter;
+	VolumetricMapStrength = fog.Strength;
 	effects.SetVolumetricFog(fog);
 	effects.SetVolumetricView(di->VPUniforms.mViewMatrix.get());
 
@@ -180,6 +215,9 @@ void R_CollectVolumetrics(HWDrawInfo *di)
 		float r = light->GetRed() / 255.f, g = light->GetGreen() / 255.f, b = light->GetBlue() / 255.f;
 		float brightness = std::max({ r, g, b }) * (float)light->GetLightDefIntensity();
 		bool candidate = light->IsActive() && !light->IsSubtractive() && light->visibletoplayer && radius > 0 && brightness > 0.02f;
+		// Map lights with a negative volumetric scatter (args[4]) don't scatter,
+		// and nothing does on a map with volumetricstrength 0.
+		if (light->volumetricScale <= 0.0f || fog.Strength <= 0.0f) candidate = false;
 		// The camera's own lights (weapon flashes) would fill the whole view with scattering.
 		if (light->target && light->target == vp.camera) candidate = false;
 
@@ -206,7 +244,7 @@ void R_CollectVolumetrics(HWDrawInfo *di)
 		}
 
 		float fade = light->volumetricFade * distanceFade;
-		candidates.Push({ brightness * radius / float(dist + 64.0) * fade, light, fade });
+		candidates.Push({ brightness * radius / float(dist + 64.0) * fade * light->volumetricScale, light, fade });
 	}
 
 	VolumetricCandidates = candidates.Size();
@@ -239,7 +277,7 @@ void R_CollectVolumetrics(HWDrawInfo *di)
 	for (int i = 0; i < count; i++)
 	{
 		FDynamicLight *light = candidates[i].light;
-		float fade = candidates[i].fade * (float)light->GetLightDefIntensity();
+		float fade = candidates[i].fade * (float)light->GetLightDefIntensity() * light->volumetricScale;
 		float radius = light->GetRadius();
 
 		VolumetricLight vl;

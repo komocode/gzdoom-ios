@@ -3009,6 +3009,7 @@ OptionValue "ParticleModes"
 	0, "$OPTVAL_OFF"
 	1, "Normal"
 	2, "Dense"
+	3, "Cinematic (adaptive)"
 }
 
 OptionValue "WeatherModes"
@@ -3046,6 +3047,15 @@ OptionString "GradingLUTs"
 	"LUTNIGHT", "Cinematic night"
 }
 
+OptionValue "SpriteMaterialViews"
+{
+	0, "Lit"
+	1, "Surface normals"
+	2, "Roughness"
+	3, "Metallic"
+	4, "Ambient occlusion"
+}
+
 OptionMenu "ModernRenderMenu" protected
 {
 	Title "Modern Rendering"
@@ -3068,6 +3078,7 @@ OptionMenu "ModernRenderMenu" protected
 	Slider "Volumetric fade distance",		r_volumetric_distance,	1024, 8192, 256, 0
 	Slider "Fog glow around lights",		r_volumetric_fogscatter,	0.0, 3.0, 0.1, 1
 	Option "Height fog",					r_heightfog,			"OnOff"
+	Option "Map atmosphere overrides",		r_map_atmosphere,		"OnOff"
 	Option "Dynamic light shadows",			gl_light_shadowmap,		"OnOff"
 	Option "Manual ray traced shadows (restart)",	vk_raytrace,		"OnOff"
 	Option "Models in baked GI and traced shadows",	r_staticmodels,	"StaticModelModes"
@@ -3084,6 +3095,13 @@ OptionMenu "ModernRenderMenu" protected
 	Option "Screen-space reflections",		r_ssr,					"SSRModes"
 	Slider "Reflection strength",			r_ssr_strength,			0.0, 2.0, 0.1, 1
 	Slider "Reflection streaks",			r_ssr_stretch,			0.0, 6.0, 0.5, 1
+	StaticText " "
+	StaticText "Sprite materials", 1
+	Option "Authored sprite lighting", r_sprite_pbr, "OnOff"
+	Option "Sprite environment reflections", r_sprite_reflections, "OnOff"
+	Slider "Sprite light strength", r_sprite_light_strength, 0.0, 6.0, 0.1, 1
+	Slider "Sprite normal strength", r_sprite_normal_strength, 0.0, 3.0, 0.1, 1
+	Option "Sprite material view", r_sprite_debug, "SpriteMaterialViews"
 	StaticText " "
 	StaticText "Effects", 1
 	Option "Impact and explosion particles",	r_gpuparticles,			"ParticleModes"

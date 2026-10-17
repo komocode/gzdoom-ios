@@ -8,6 +8,10 @@ layout(location = 4) in vec3 gradientdist;
 layout(location = 5) in vec4 vWorldNormal;
 layout(location = 6) in vec4 vEyeNormal;
 layout(location = 9) in vec3 vLightmap;
+layout(location = 10) flat in vec4 vVolumeRow0;
+layout(location = 11) flat in vec4 vVolumeRow1;
+layout(location = 12) flat in vec4 vVolumeRow2;
+layout(location = 13) flat in vec4 vVolumeParams;
 
 #ifdef NO_CLIPDISTANCE_SUPPORT
 layout(location = 7) in vec4 ClipDistanceA;
@@ -41,6 +45,20 @@ void SetupMaterial(inout Material mat);
 vec4 ProcessLight(Material mat, vec4 color);
 vec3 ProcessMaterialLight(Material material, vec3 color);
 vec2 GetTexCoord();
+
+// w > 0 is reserved for GPU particles. A negative value marks an actor
+// explicitly opted into sprite materials by the renderer; normals alone must
+// not change HUD sprites, effects, models, or classic colormap behavior.
+bool IsPBRSprite()
+{
+	return (uRenderFeatures & 128) != 0 && uMaterialParams.w < 0.0;
+}
+
+vec3 SafeNormal(vec3 direction, vec3 fallback)
+{
+	float lengthSquared = dot(direction, direction);
+	return lengthSquared > 1e-12 ? direction * inversesqrt(lengthSquared) : fallback;
+}
 
 // These get Or'ed into uTextureMode because it only uses its 3 lowermost bits.
 const int TEXF_Brightmap = 0x10000;
@@ -306,7 +324,7 @@ float R_DoomColormap(float light, float z)
 	{
 		float lightnum = clamp(light * 15.0, 0.0, 15.0);
 
-		if (dot(vWorldNormal.xyz, vWorldNormal.xyz) > 0.5)
+		if (!IsPBRSprite() && dot(vWorldNormal.xyz, vWorldNormal.xyz) > 0.5)
 		{
 			vec3 normal = normalize(vWorldNormal.xyz);
 			return mix(R_WallColormap(lightnum, z, normal), R_PlaneColormap(lightnum, z), abs(normal.y));
@@ -629,6 +647,21 @@ float shadowmapAttenuation(vec4 lightpos, float shadowIndex)
 		return 1.0; // Light is too close
 
 	float v = (shadowIndex + 0.5) / 1024.0;
+	if (IsPBRSprite())
+	{
+		// A billboard represents a volume, not an infinite receiver plane.
+		// Plane/PCF intersections become singular for side lights on sprites.
+		float receiverDistance = max(length(planePoint.xz) - 1.0, 0.0);
+		float u = shadowDirToU(planePoint.xz);
+		float distanceSquared = receiverDistance * receiverDistance;
+		if (uShadowmapFilter <= 0)
+			return step(distanceSquared, texture(ShadowMap, vec2(u, v)).x);
+		float texel = 1.0 / float(textureSize(ShadowMap, 0).x);
+		float visibility = 0.0;
+		for (int tap = -1; tap <= 1; ++tap)
+			visibility += step(distanceSquared, texture(ShadowMap, vec2(fract(u + float(tap) * texel), v)).x);
+		return visibility / 3.0;
+	}
 
 	if (uShadowmapFilter <= 0)
 	{
@@ -680,6 +713,22 @@ mat3 cotangent_frame(vec3 n, vec3 p, vec2 uv)
 	vec3 dp2 = dFdy(p);
 	vec2 duv1 = dFdx(uv);
 	vec2 duv2 = dFdy(uv);
+	if (IsPBRSprite())
+	{
+		// Solve using the UV determinant rather than assuming the billboard's
+		// winding. Mirrored Doom rotations reverse U and must reverse the
+		// tangent without reversing the normal toward the camera.
+		float determinant = duv1.x * duv2.y - duv1.y * duv2.x;
+		if (abs(determinant) > 1e-12)
+		{
+			vec3 spriteT = (dp1 * duv2.y - dp2 * duv1.y) / determinant;
+			vec3 spriteB = (dp2 * duv1.x - dp1 * duv2.x) / determinant;
+			spriteT -= n * dot(n, spriteT);
+			spriteB -= n * dot(n, spriteB);
+			if (dot(spriteT, spriteT) > 1e-12 && dot(spriteB, spriteB) > 1e-12)
+				return mat3(normalize(spriteT), normalize(spriteB), n);
+		}
+	}
 
 	// solve the linear system
 	vec3 dp2perp = cross(n, dp2); // cross(dp2, n);
@@ -688,7 +737,16 @@ mat3 cotangent_frame(vec3 n, vec3 p, vec2 uv)
 	vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
 
 	// construct a scale-invariant frame
-	float invmax = inversesqrt(max(dot(t,t), dot(b,b)));
+	float frameSize = max(dot(t,t), dot(b,b));
+	if (IsPBRSprite() && frameSize < 1e-12)
+	{
+		// Degenerate UVs can occur on tiny or clipped sprites. Keep the frame
+		// finite, including frames rendered without any dynamic lights.
+		vec3 axis = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+		t = SafeNormal(cross(axis, n), vec3(1.0, 0.0, 0.0));
+		return mat3(t, cross(n, t), n);
+	}
+	float invmax = inversesqrt(frameSize);
 	return mat3(t * invmax, b * invmax, n);
 }
 
@@ -699,7 +757,7 @@ vec3 ApplyNormalMap(vec2 texcoord)
 	#define WITH_NORMALMAP_GREEN_UP
 	//#define WITH_NORMALMAP_2CHANNEL
 
-	vec3 interpolatedNormal = normalize(vWorldNormal.xyz);
+	vec3 interpolatedNormal = IsPBRSprite() ? SafeNormal(vWorldNormal.xyz, vec3(0.0, 0.0, 1.0)) : normalize(vWorldNormal.xyz);
 
 	vec3 map = texture(normaltexture, texcoord).xyz;
 	#if defined(WITH_NORMALMAP_UNSIGNED)
@@ -711,15 +769,16 @@ vec3 ApplyNormalMap(vec2 texcoord)
 	#if defined(WITH_NORMALMAP_GREEN_UP)
 	map.y = -map.y;
 	#endif
+	if (IsPBRSprite()) map.xy *= max(uMaterialParams.x, 0.0);
 
 	mat3 tbn = cotangent_frame(interpolatedNormal, pixelpos.xyz, vTexCoord.st);
-	vec3 bumpedNormal = normalize(tbn * map);
+	vec3 bumpedNormal = IsPBRSprite() ? SafeNormal(tbn * map, interpolatedNormal) : normalize(tbn * map);
 	return bumpedNormal;
 }
 #else
 vec3 ApplyNormalMap(vec2 texcoord)
 {
-	return normalize(vWorldNormal.xyz);
+	return IsPBRSprite() ? SafeNormal(vWorldNormal.xyz, vec3(0.0)) : normalize(vWorldNormal.xyz);
 }
 #endif
 
@@ -736,6 +795,8 @@ const int RF_IRRADIANCE = 8;
 const int RF_REFLECTIONS = 16;
 const int RF_PARALLAX = 32;
 const int RF_HDR_EMISSIVE = 64;
+const int RF_SPRITE_PBR = 128;
+const int RF_SPRITE_REFLECTIONS = 256;
 
 bool HasFeature(int feature)
 {
@@ -745,6 +806,18 @@ bool HasFeature(int feature)
 bool HasSurfaceNormal()
 {
 	return dot(vWorldNormal.xyz, vWorldNormal.xyz) > 0.5;
+}
+
+// The directional sun (hw_sun.h) lights this draw. Its shading is only compiled
+// into the scene shaders' sun variants (SUN_LIGHT), which the backends use while a
+// sunlit viewpoint is bound, so the shaders of maps without a sun are unchanged.
+bool SunActive()
+{
+#ifdef SUN_LIGHT
+	return uSunDir.w > 0.0 && uSurfaceParams.z < 0.5;
+#else
+	return false;
+#endif
 }
 
 //===========================================================================
@@ -837,7 +910,7 @@ float HeightAt(vec2 st, vec2 gx, vec2 gy)
 vec2 ParallaxTexCoord(vec2 st)
 {
 	vec2 gx = dFdx(st), gy = dFdy(st);
-	if (uMaterialParams.z == 0.0 || !HasSurfaceNormal() || (uTextureMode & 0xffff) != 0) return st;
+	if (IsPBRSprite() || uMaterialParams.z == 0.0 || !HasSurfaceNormal() || (uTextureMode & 0xffff) != 0) return st;
 	vec3 toCamera = uCameraPos.xyz - pixelpos.xyz;
 	float dist = length(toCamera);
 	float fade = (1.0 - smoothstep(256.0, 640.0, dist)) * (1.0 - gPuddle);
@@ -897,14 +970,19 @@ vec3 SampleIrradianceFace(int face, vec2 uv, float z0, float z1, float t)
 	return mix(a, b, t);
 }
 
-// Ambient cube lookup. normal is in world space (x, height, y); zero for sprites.
+// Ambient cube lookup. normal is in world space (x, height, y); zero for
+// classic sprites, while material sprites sample with their per-pixel normal.
 vec3 SampleIrradiance(vec3 normal)
 {
 	vec3 n = normal.xzy;
 	vec3 mapPos = pixelpos.xzy;
-	float spacing = uGIOrigin.w;
-	vec3 p = (mapPos + n * (spacing * 0.5) - uGIOrigin.xyz) / spacing;
-	vec2 uv = (p.xy + 0.5) / uGISize.xy;
+	float spacing = max(uGIOrigin.w, 0.001);
+	// Normal maps change the sampling direction, not the character's position.
+	// Offset by its billboard normal so adjacent texels cannot jump through
+	// walls into a different room as their authored surface direction varies.
+	vec3 offsetNormal = IsPBRSprite() ? SafeNormal(vWorldNormal.xyz, vec3(0.0)).xzy : n;
+	vec3 p = (mapPos + offsetNormal * (spacing * 0.5) - uGIOrigin.xyz) / spacing;
+	vec2 uv = (clamp(p.xy, vec2(0.0), uGISize.xy - 1.0) + 0.5) / vec2(textureSize(IrradianceVolume, 0).xy);
 	float z = clamp(p.z, 0.0, uGISize.z - 1.0);
 	float z0 = floor(z);
 	float z1 = min(z0 + 1.0, uGISize.z - 1.0);
@@ -924,9 +1002,10 @@ vec3 SampleIrradiance(vec3 normal)
 // Raises the effective light level toward the bounced light from brighter
 // surroundings and tints the surface with the color of nearby surfaces.
 // Doom's own light level stays the minimum.
-void ApplyIrradiance(inout float lightlevel, inout vec3 tint)
+void ApplyIrradiance(inout float lightlevel, inout vec3 tint, vec3 materialNormal)
 {
-	vec3 gi = SampleIrradiance(HasSurfaceNormal() ? normalize(vWorldNormal.xyz) : vec3(0.0)) * uGIStrength;
+	vec3 normal = IsPBRSprite() ? materialNormal : (HasSurfaceNormal() ? normalize(vWorldNormal.xyz) : vec3(0.0));
+	vec3 gi = SampleIrradiance(normal) * uGIStrength;
 	float lum = dot(gi, vec3(0.2126, 0.7152, 0.0722));
 	// Only add the part of the bounce that exceeds the sector light, and only
 	// partially, so authored light contrast survives.
@@ -965,6 +1044,207 @@ float SoftDepthFade(float dist)
 	return clamp((sceneDepth - pixelpos.w) / dist, 0.0, 1.0);
 }
 
+void ApplySpriteVertexIrradiance(inout vec3 color, vec3 normal)
+{
+	// Non-software light modes already carry their sector brightness in
+	// vColor. They still need directional bounce when distance fog is off.
+	float originalLevel = max(max(color.r, color.g), color.b);
+	float lightlevel = originalLevel;
+	vec3 tint;
+	ApplyIrradiance(lightlevel, tint, normal);
+	vec3 sectorTint = originalLevel > 0.001 ? color / originalLevel : vec3(1.0);
+	color = sectorTint * lightlevel * tint;
+}
+
+// The sprite path uses the same maps as authored surface PBR materials, but
+// keeps the sector light level as diffuse ambient illumination. Direct lights
+// enter exactly once here; uDynLightColor is only the optional residual light.
+// These functions intentionally do not change the existing wall/model BRDF.
+void SpriteMaterialProperties(Material material, out float metallic, out float roughness, out float ao, out vec3 f0)
+{
+	vec3 albedo = pow(max(material.Base.rgb, vec3(0.0)), vec3(2.2));
+#if defined(PBR)
+	metallic = clamp(material.Metallic, 0.0, 1.0);
+	roughness = clamp(material.Roughness, 0.12, 1.0);
+	ao = clamp(material.AO, 0.0, 1.0);
+	f0 = mix(vec3(0.04), albedo, metallic);
+#elif defined(SPECULAR)
+	// Authored specular maps remain authoritative, including colored metals.
+	// Their exponent follows the existing GZDoom specular shader convention.
+	metallic = 0.0;
+	roughness = clamp(pow(2.0 / (max(material.Glossiness * 4.0, 0.0) + 2.0), 0.25), 0.12, 1.0);
+	ao = 1.0;
+	f0 = clamp(material.Specular * material.SpecularLevel, vec3(0.0), vec3(0.98));
+#else
+	metallic = 0.0;
+	roughness = 0.85;
+	ao = 1.0;
+	f0 = vec3(0.04);
+#endif
+}
+
+vec3 SpriteFresnel(float cosine, vec3 f0)
+{
+	return f0 + (1.0 - f0) * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+}
+
+vec3 SpriteLightContribution(int index, vec3 albedo, vec3 normal, vec3 viewdir, vec3 f0, float metallic, float roughness)
+{
+	vec4 lightpos = lights[index];
+	vec4 lightcolor = lights[index + 1];
+	vec4 spot1 = lights[index + 2];
+	vec4 spot2 = lights[index + 3];
+	vec3 toLight = lightpos.xyz - pixelpos.xyz;
+	float distanceToLight = length(toLight);
+	if (lightpos.w <= 0.0 || distanceToLight >= lightpos.w) return vec3(0.0);
+	vec3 lightdir = SafeNormal(toLight, normal);
+	float attenuation = 1.0 - distanceToLight / lightpos.w;
+	if (spot1.w == 1.0)
+		attenuation *= spotLightAttenuation(lightpos, spot1.xyz, spot2.x, spot2.y);
+	if (attenuation <= 0.0) return vec3(0.0);
+	attenuation *= shadowAttenuation(lightpos, lightcolor.a);
+	if (attenuation <= 0.0) return vec3(0.0);
+
+	float ndotl = dot(normal, lightdir);
+	float nl = max(ndotl, 0.0);
+	float nv = max(dot(normal, viewdir), 0.001);
+	vec3 halfdir = SafeNormal(viewdir + lightdir, normal);
+	float nh = max(dot(normal, halfdir), 0.0);
+	vec3 fresnel = SpriteFresnel(dot(halfdir, viewdir), f0);
+	float alpha = roughness * roughness;
+	float alpha2 = alpha * alpha;
+	float denominator = nh * nh * (alpha2 - 1.0) + 1.0;
+	float distribution = alpha2 / max(3.14159265359 * denominator * denominator, 1e-6);
+	float k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
+	float geometry = nv / (nv * (1.0 - k) + k) * nl / max(nl * (1.0 - k) + k, 0.001);
+	vec3 specular = distribution * geometry * fresnel / max(4.0 * nv * nl, 0.001);
+	// The shallow wrap softens the edge of the authored rounded volume. There is
+	// no billboard-plane backface rejection: side lights can catch a shoulder.
+	// Specular remains strictly in the visible lit hemisphere. The light's
+	// legacy attenuated flag must not apply a second cosine to this BRDF.
+	float diffuseCosine = clamp((ndotl + 0.12) / 1.12, 0.0, 1.0);
+	vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * albedo * (diffuseCosine / 3.14159265359);
+	vec3 radiance = max(desaturate(vec4(lightcolor.rgb, 0.0)).rgb, vec3(0.0)) * attenuation;
+	// Authored sprites can boost local light without lifting neutral ambient
+	// or changing the material response of walls, models and classic sprites.
+	return (diffuse + specular * nl) * radiance * uMaterialParams.z;
+}
+
+// Baked static-room radiance, stored in the IrradianceVolume array after its
+// diffuse ambient-cube slices. Each probe occupies four bordered octahedral
+// maps in a 2x2 tile; levels 0..3 increase roughness. Values are linear RGB.
+vec2 ReflectionOctaUV(vec3 direction)
+{
+	vec3 n = direction / max(abs(direction.x) + abs(direction.y) + abs(direction.z), 1e-6);
+	vec2 uv = n.xy;
+	if (n.z < 0.0)
+		uv = (vec2(1.0) - abs(uv.yx)) * vec2(uv.x >= 0.0 ? 1.0 : -1.0, uv.y >= 0.0 ? 1.0 : -1.0);
+	return uv * 0.5 + 0.5;
+}
+
+vec4 SampleReflectionProbe(vec3 index, vec2 octaUV, float roughness)
+{
+	float probe = (index.z * uReflectionSize.y + index.y) * uReflectionSize.x + index.x;
+	float perLayer = uReflectionAtlas.x * uReflectionAtlas.y;
+	float layer = uReflectionSize.w + floor(probe / perLayer);
+	float tile = mod(probe, perLayer);
+	float bordered = uReflectionAtlas.z + 2.0;
+	vec2 tilePos = vec2(mod(tile, uReflectionAtlas.x), floor(tile / uReflectionAtlas.x)) * (bordered * 2.0);
+	float lod = clamp(roughness, 0.0, 1.0) * 3.0;
+	float lo = floor(lod), hi = min(lo + 1.0, 3.0);
+	vec2 loPos = vec2(mod(lo, 2.0), floor(lo / 2.0)) * bordered;
+	vec2 hiPos = vec2(mod(hi, 2.0), floor(hi / 2.0)) * bordered;
+	vec2 texel = tilePos + vec2(1.0) + octaUV * uReflectionAtlas.z;
+	vec2 extent = vec2(textureSize(IrradianceVolume, 0).xy);
+	vec4 a = texture(IrradianceVolume, vec3((texel + loPos) / extent, layer));
+	vec4 b = texture(IrradianceVolume, vec3((texel + hiPos) / extent, layer));
+	return mix(a, b, fract(lod));
+}
+
+vec3 SampleSpriteEnvironment(vec3 worldPosition, vec3 reflectionDirection, float roughness, out float coverage)
+{
+	coverage = 0.0;
+	if (uReflectionAtlas.w < 0.5 || !HasFeature(RF_SPRITE_REFLECTIONS)) return vec3(0.0);
+	vec3 p = clamp((worldPosition.xzy - uReflectionOrigin.xyz) / uReflectionOrigin.w,
+		vec3(0.0), uReflectionSize.xyz - vec3(1.0));
+	vec3 lo = floor(p), hi = min(lo + vec3(1.0), uReflectionSize.xyz - vec3(1.0));
+	vec3 blend = fract(p);
+	vec2 uv = ReflectionOctaUV(reflectionDirection.xzy);
+	vec4 result = vec4(0.0);
+	// Trilinear spatial interpolation avoids reflection popping as actors move.
+	// Invalid probes are transparent, and remaining weights are renormalized.
+	for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++)
+	{
+		vec3 side = vec3(float(x), float(y), float(z));
+		vec3 weight = mix(vec3(1.0) - blend, blend, side);
+		float w = weight.x * weight.y * weight.z;
+		if (w > 0.0001) result += SampleReflectionProbe(mix(lo, hi, side), uv, roughness) * w;
+	}
+	coverage = result.a;
+	return result.a > 0.0001 ? result.rgb / result.a : vec3(0.0);
+}
+
+
+vec3 ProcessSpriteMaterialLight(Material material, vec3 ambientLight)
+{
+	float metallic, roughness, ao;
+	vec3 f0;
+	SpriteMaterialProperties(material, metallic, roughness, ao, f0);
+	vec3 normal = SafeNormal(material.Normal, SafeNormal(vWorldNormal.xyz, vec3(0.0, 0.0, 1.0)));
+	vec3 viewdir = SafeNormal(uCameraPos.xyz - pixelpos.xyz, normal);
+	vec3 albedo = pow(max(material.Base.rgb, vec3(0.0)), vec3(2.2));
+	vec3 ambient = pow(max(ambientLight + desaturate(uDynLightColor).rgb, vec3(0.0)), vec3(2.2));
+	float nv = max(dot(normal, viewdir), 0.0);
+	vec3 fresnel = f0 + (max(vec3(1.0 - roughness), f0) - f0) * pow(1.0 - nv, 5.0);
+	vec3 color = ambient * albedo * (1.0 - metallic) * (1.0 - fresnel) * ao;
+
+	if (uLightIndex >= 0)
+	{
+		ivec4 range = ivec4(lights[uLightIndex]) + ivec4(uLightIndex + 1);
+		for (int i = range.x; i < range.y; i += 4)
+			color += SpriteLightContribution(i, albedo, normal, viewdir, f0, metallic, roughness);
+		for (int i = range.y; i < range.z; i += 4)
+			color -= SpriteLightContribution(i, albedo, normal, viewdir, f0, metallic, roughness);
+		for (int i = range.z; i < range.w; i += 4)
+			color += SpriteLightContribution(i, albedo, normal, viewdir, f0, metallic, roughness);
+	}
+
+	// The sector's ambient illumination is also the fallback environment.
+	// Without an environment source a fully metallic helmet would be black.
+	vec3 environment = ambient;
+	if (HasFeature(RF_SPRITE_REFLECTIONS))
+	{
+		float coverage;
+		vec3 probe = SampleSpriteEnvironment(pixelpos.xyz, reflect(-viewdir, normal), roughness, coverage);
+		if (coverage > 0.0001) environment = probe;
+	}
+	// Analytic split-sum environment BRDF approximation (Lazarov 2013).
+	vec4 r = roughness * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+	float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+	vec2 brdf = vec2(-1.04, 1.04) * a004 + r.zw;
+	color += environment * max(f0 * brdf.x + brdf.y, vec3(0.0)) * ao;
+#if !defined(LEGACY_USER_SHADER) && !defined(NO_LAYERS)
+	// Emissive eyes, lamps and other authored bright texels retain their
+	// brightness even when their underlying material happens to be metallic.
+	color = max(color, albedo * pow(clamp(material.Bright.rgb, 0.0, 1.0), vec3(2.2)));
+	color = mix(color, max(color, albedo * pow(max(material.Glow.rgb, vec3(0.0)), vec3(2.2))), clamp(material.Glow.a, 0.0, 1.0));
+#endif
+	return pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+vec3 SpriteDebugMaterial(Material material)
+{
+	float metallic, roughness, ao;
+	vec3 f0;
+	SpriteMaterialProperties(material, metallic, roughness, ao, f0);
+	int mode = int(uMaterialParams.y + 0.5);
+	if (mode == 1) return material.Normal * 0.5 + 0.5;
+	if (mode == 2) return vec3(roughness);
+	if (mode == 3) return vec3(metallic);
+	if (mode == 4) return vec3(ao);
+	return material.Base.rgb;
+}
+
 //===========================================================================
 //
 // Sets the common material properties.
@@ -987,7 +1267,7 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 	material.Normal = ApplyNormalMap(texCoord.st);
 #if !defined(NORMALMAP) && !defined(NO_LAYERS)
 	vec2 stdx = dFdx(texCoord.st), stdy = dFdy(texCoord.st);
-	if (HasFeature(RF_AUTO_NORMAL) && uLightIndex >= 0 && HasSurfaceNormal())
+	if (HasFeature(RF_AUTO_NORMAL) && (uLightIndex >= 0 || SunActive()) && HasSurfaceNormal())
 		material.Normal = AutoNormal(normalize(vWorldNormal.xyz), texCoord.st, stdx, stdy);
 #endif
 
@@ -1021,7 +1301,7 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 
 void SetupReflection(inout Material material)
 {
-	if (!HasFeature(RF_MODERN_LIGHT)) return;
+	if (IsPBRSprite() || !HasFeature(RF_MODERN_LIGHT)) return;
 
 	float up = UpFacing();
 	float lum = grayscale(material.Base);
@@ -1056,7 +1336,7 @@ void SetupReflection(inout Material material)
 	vec3 geom = normalize(vWorldNormal.xyz);
 	vec3 n = material.Normal;
 #if !defined(NORMALMAP) && !defined(NO_LAYERS)
-	if (HasFeature(RF_AUTO_NORMAL) && uLightIndex < 0)
+	if (HasFeature(RF_AUTO_NORMAL) && uLightIndex < 0 && !SunActive())
 		n = AutoNormal(geom, gTexCoord, dFdx(gTexCoord), dFdy(gTexCoord));
 #endif
 	if (dot(n, n) < 0.5) n = geom;
@@ -1070,6 +1350,202 @@ void SetupReflection(inout Material material)
 	}
 	gReflectNormal = n;
 }
+
+#ifdef SUN_LIGHT
+//===========================================================================
+//
+// Directional sun (hw_sun.h). The shadow map holds, per texel, the depth along
+// the sunlight of the surface nearest to the sun. It is read with texelFetch
+// and box filtered here over every texel the kernel touches. The receiver is
+// moved off its surface along the geometric normal by an amount that grows
+// with the filter radius and the slope to the sun, which keeps lit surfaces
+// free of acne without detaching contact shadows.
+//
+//===========================================================================
+
+// Fraction of the sun reaching pos (x, height, y). normal is the geometric
+// normal and nl its cosine to the sun; a zero normal (sprites) moves toward the sun.
+float SunShadow(vec3 pos, vec3 normal, float nl)
+{
+	if (uSunParams.x <= 0.0) return 1.0;
+	float texel = uSunParams.w;
+	float radius = clamp(uSunParams.z, 0.0, 8.0);
+	vec3 p;
+	if (dot(normal, normal) > 0.5)
+	{
+		float sinTheta = sqrt(max(1.0 - nl * nl, 0.0));
+		p = pos + normal * (texel * ((radius + 0.75) * sinTheta + 0.3));
+	}
+	else p = pos + uSunDir.xyz * texel;
+	vec4 q = vec4(p, 1.0);
+	vec2 uv = vec2(dot(uSunShadowU, q), dot(uSunShadowV, q));
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= uSunParams.x || uv.y >= uSunParams.y) return 1.0;
+	float depth = dot(uSunShadowD, q) - texel * 0.3;
+	ivec2 last = ivec2(uSunParams.xy) - 1;
+	float r = max(radius, 0.5);
+
+	// Most kernels are entirely lit or entirely shadowed. Any shadow edge that
+	// crosses the kernel separates two of its corners, and the centre catches
+	// thin bars, so those decide; wide kernels also check the edge midpoints.
+	ivec2 c0 = clamp(ivec2(floor(uv - r)), ivec2(0), last), c1 = clamp(ivec2(floor(uv + r)), ivec2(0), last);
+	ivec2 cm = clamp(ivec2(floor(uv)), ivec2(0), last);
+	float probe = step(depth, texelFetch(SunShadowMap, cm, 0).r) +
+		step(depth, texelFetch(SunShadowMap, c0, 0).r) + step(depth, texelFetch(SunShadowMap, c1, 0).r) +
+		step(depth, texelFetch(SunShadowMap, ivec2(c0.x, c1.y), 0).r) + step(depth, texelFetch(SunShadowMap, ivec2(c1.x, c0.y), 0).r);
+	float probes = 5.0;
+	if (r > 2.5)
+	{
+		probe += step(depth, texelFetch(SunShadowMap, ivec2(cm.x, c0.y), 0).r) + step(depth, texelFetch(SunShadowMap, ivec2(cm.x, c1.y), 0).r) +
+			step(depth, texelFetch(SunShadowMap, ivec2(c0.x, cm.y), 0).r) + step(depth, texelFetch(SunShadowMap, ivec2(c1.x, cm.y), 0).r);
+		probes = 9.0;
+	}
+	if (probe < 0.5) return 0.0;
+	if (probe > probes - 0.5) return 1.0;
+
+	// Box filter of half-width r around uv: each texel weighs by its overlap.
+	// Up to 8x8 texels are read; wider kernels take every other texel or so.
+	float stride = max(1.0, ceil((2.0 * r + 1.0) / 8.0));
+	vec2 lo = uv - r, hi = uv + r;
+	vec2 first = floor(lo / stride) * stride;
+	float lit = 0.0, total = 0.0;
+	for (int y = 0; y < 8; y++)
+	{
+		float ty = first.y + float(y) * stride;
+		if (ty >= hi.y) break;
+		float wy = min(hi.y, ty + stride) - max(lo.y, ty);
+		for (int x = 0; x < 8; x++)
+		{
+			float tx = first.x + float(x) * stride;
+			if (tx >= hi.x) break;
+			float w = wy * (min(hi.x, tx + stride) - max(lo.x, tx));
+			ivec2 t = clamp(ivec2(vec2(tx, ty) + 0.5 * stride), ivec2(0), last);
+			lit += w * step(depth, texelFetch(SunShadowMap, t, 0).r);
+			total += w;
+		}
+	}
+	return total > 0.0 ? lit / total : 1.0;
+}
+
+// The sun's highlight per unit of sun colour, in the units of the diffuse term
+// (albedo * N.L, which has no 1/pi): pi * GGX BRDF * N.L. Wet surfaces stretch
+// it toward the viewer like the dynamic light highlights.
+vec3 SunSpecular(vec3 n, vec3 L, vec3 V, float roughness, vec3 f0, float stretch)
+{
+	float nl = dot(n, L);
+	if (nl <= 0.0) return vec3(0.0);
+	vec3 h = normalize(L + V);
+	if (stretch > 0.0)
+	{
+		vec3 t = V - n * dot(V, n);
+		float tl = length(t);
+		if (tl > 1e-3)
+		{
+			t /= tl;
+			h = normalize(h - t * dot(h, t) * stretch);
+		}
+	}
+	float nh = max(dot(n, h), 0.0);
+	float nv = max(dot(n, V), 0.03);
+	float a = roughness * roughness;
+	float a2 = a * a;
+	float den = nh * nh * (a2 - 1.0) + 1.0;
+	float D = a2 / max(3.14159265 * den * den, 1e-6);
+	float k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
+	float G = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k);
+	vec3 F = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(h, V), 0.0, 1.0), 5.0);
+	return min(F * (D * G * 3.14159265 / (4.0 * nv)), vec3(16.0));
+}
+
+// The sun's light on this fragment, linear, before fog. main() evaluates it after
+// the scene lighting, from values that are still live there (the material, the
+// reflection setup) or cheap to get again (varyings, uniforms), which keeps the
+// sun variant's register use close to that of the plain shader.
+vec3 SunLight(Material material)
+{
+	vec3 L = uSunDir.xyz;
+	bool hud = uSunParams2.y > 0.5;
+	vec3 albedo = max(material.Base.rgb, vec3(0.0));
+	albedo *= albedo;
+	vec3 light;
+	if (IsPBRSprite())
+	{
+		// Authored sprite materials: their normal maps with the shallow wrap of
+		// their dynamic lights, and their own roughness and metalness.
+		float metallic, roughness, ao;
+		vec3 f0;
+		SpriteMaterialProperties(material, metallic, roughness, ao, f0);
+		vec3 n = SafeNormal(material.Normal, SafeNormal(vWorldNormal.xyz, vec3(0.0, 1.0, 0.0)));
+		float wrap = clamp((dot(n, L) + 0.12) / 1.12, 0.0, 1.0);
+		if (wrap <= 0.0) return vec3(0.0);
+		float shadow = hud ? 1.0 : SunShadow(pixelpos.xyz, vec3(0.0), 1.0);
+		if (shadow <= 0.0) return vec3(0.0);
+		vec3 V = hud ? vec3(0.0, 0.0, 1.0) : SafeNormal(uCameraPos.xyz - pixelpos.xyz, n);
+		vec3 spec = SunSpecular(n, L, V, max(roughness, 0.1), f0, 0.0);
+		light = (albedo * ((1.0 - metallic) * wrap * ao) + spec * uSunColor.w) * shadow;
+	}
+	else if (HasSurfaceNormal())
+	{
+		vec3 geom = normalize(vWorldNormal.xyz);
+		float gnl = dot(geom, L);
+		if (gnl <= 0.0) return vec3(0.0);
+		// The material normal carries normal maps and the automatic relief.
+		vec3 n = dot(material.Normal, material.Normal) > 0.5 ? material.Normal : geom;
+		// Relief may not light what faces away from the sun, nor fully darken a lit face.
+		float nl = clamp(dot(n, L), gnl * 0.25, 1.0) * smoothstep(0.0, 0.05, gnl);
+		float shadow = hud ? 1.0 : SunShadow(pixelpos.xyz, geom, gnl);
+		if (shadow <= 0.0) return vec3(0.0);
+
+		// Roughness from the reflection setup, which has the water film: wet
+		// surfaces gloss up and puddles mirror the sun's disc.
+		float metallic = 0.0;
+		float roughness = HasFeature(RF_REFLECTIONS) ? gRoughness : mix(0.8, 0.35, clamp(uMaterialParams.y, 0.0, 1.0));
+		vec3 f0 = vec3(0.04);
+#if defined(PBR)
+		metallic = clamp(material.Metallic, 0.0, 1.0);
+		roughness = min(roughness, clamp(material.Roughness, 0.05, 1.0));
+		f0 = mix(vec3(0.04), albedo, metallic);
+#elif defined(SPECULAR)
+		roughness = min(roughness, clamp(pow(2.0 / (max(material.Glossiness * 4.0, 0.0) + 2.0), 0.25), 0.1, 1.0));
+		f0 = clamp(material.Specular * material.SpecularLevel, vec3(0.02), vec3(0.98));
+#endif
+		roughness = max(roughness, 0.1);
+		float wet = clamp(uMaterialParams2.x, 0.0, 1.0) * UpFacing();
+		f0 = mix(f0, vec3(0.02), wet * (1.0 - metallic));
+		vec3 specNormal = gReflectivity > 0.0 && dot(gReflectNormal, gReflectNormal) > 0.5 ? gReflectNormal : n;
+		vec3 spec = vec3(0.0);
+		if (!hud && uSunColor.w > 0.0)
+		{
+			vec3 V = normalize(uCameraPos.xyz - pixelpos.xyz);
+			spec = SunSpecular(specNormal, L, V, roughness, f0, 0.65 * wet) * uSunColor.w * smoothstep(0.0, 0.1, gnl);
+		}
+		light = (albedo * (nl * (1.0 - metallic)) + spec) * shadow;
+	}
+	else
+	{
+		// Classic sprites and the HUD weapon: no surface normal. A mild wrap
+		// toward the camera keeps back-lit sprites darker than front-lit ones.
+		float f = uSunParams2.x;
+		if (f <= 0.0)
+		{
+			vec2 toCamera = uCameraPos.xz - pixelpos.xz;
+			float c = dot(L.xz, toCamera / max(length(toCamera), 1e-3));
+			f = 0.675 + 0.325 * c;
+		}
+		float shadow = hud ? 1.0 : SunShadow(pixelpos.xyz, vec3(0.0), 1.0);
+		light = albedo * (f * shadow);
+	}
+	return max(light * uSunColor.rgb, vec3(0.0));
+}
+
+// Adds the sun to a scene fragment (gamma 2 encoded) after the light clamps.
+vec3 AddSun(vec3 frag, vec3 light, float fogfactor)
+{
+	// Black fog dims the light toward the distance (light modes without a light level).
+	if (uFogEnabled > 0 && uLightLevel < 0.0) light *= fogfactor * fogfactor;
+	frag = max(frag, vec3(0.0));
+	return sqrt(frag * frag + light);
+}
+#endif
 
 //===========================================================================
 //
@@ -1112,7 +1588,7 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 	if (uLightLevel >= 0.0)
 	{
 		float lightlevel = uLightLevel;
-		if (HasFeature(RF_IRRADIANCE)) ApplyIrradiance(lightlevel, giTint);
+		if (HasFeature(RF_IRRADIANCE)) ApplyIrradiance(lightlevel, giTint, material.Normal);
 		float newlightlevel = 1.0 - R_DoomLightingEquation(lightlevel);
 		color.rgb *= newlightlevel * giTint;
 	}
@@ -1120,9 +1596,13 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 	{
 		if (HasFeature(RF_IRRADIANCE))
 		{
-			float unused = 0.0;
-			ApplyIrradiance(unused, giTint);
-			color.rgb *= giTint;
+			if (IsPBRSprite()) ApplySpriteVertexIrradiance(color.rgb, material.Normal);
+			else
+			{
+				float unused = 0.0;
+				ApplyIrradiance(unused, giTint, material.Normal);
+				color.rgb *= giTint;
+			}
 		}
 
 		// brightening around the player for light mode 2
@@ -1135,6 +1615,10 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 		// apply light diminishing through fog equation
 		//
 		color.rgb = mix(vec3(0.0, 0.0, 0.0), color.rgb, fogfactor);
+	}
+	else if (IsPBRSprite() && HasFeature(RF_IRRADIANCE))
+	{
+		ApplySpriteVertexIrradiance(color.rgb, material.Normal);
 	}
 
 	//
@@ -1179,7 +1663,7 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 	//
 	// apply dynamic lights
 	//
-	vec3 frag = ProcessMaterialLight(material, color.rgb);
+	vec3 frag = IsPBRSprite() ? ProcessSpriteMaterialLight(material, color.rgb) : ProcessMaterialLight(material, color.rgb);
 
 	//
 	// HDR emission: bright texels may exceed white so they drive bloom. With a
@@ -1257,11 +1741,69 @@ float ParticleNoise(vec2 p)
 		mix(ParticleHash(i + vec2(0.0, 1.0)), ParticleHash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
 
+// Exact optical depth of rho = extinction * (1 - dot(local, local))^2
+// inside unit ellipsoid support. The ray parameter is eye-space distance;
+// the caller converts extinction from world units using the view metric.
+float VolumeChordIntegral(vec3 p, vec3 b, float nearT, float farT, float extinction)
+{
+	float aa = dot(b, b);
+	if (aa <= 1.0e-20 || extinction <= 0.0 || farT <= nearT) return 0.0;
+	float tc = -dot(p, b) / aa;
+	vec3 closest = p + tc * b;
+	float h = 1.0 - dot(closest, closest);
+	if (h <= 0.0) return 0.0;
+	float halfChord = sqrt(h / aa);
+	float lo = max(-1.0, (nearT - tc) / halfChord);
+	float hi = min(1.0, (farT - tc) / halfChord);
+	if (hi <= lo) return 0.0;
+	// A symmetric polynomial difference stays positive in very short clips.
+	float mid = (lo + hi) * 0.5, delta = (hi - lo) * 0.5;
+	float m2 = mid * mid, d2 = delta * delta;
+	float integral = 2.0 * delta * ((1.0 - m2) * (1.0 - m2) + d2 * (-2.0 + 6.0 * m2) / 3.0 + d2 * d2 / 5.0);
+	return max(0.0, extinction * h * h * halfChord * integral);
+}
+
+bool ClipVolumeHalfspace(float originDistance, float raySlope, inout float nearT, inout float farT)
+{
+	if (abs(raySlope) < 0.0000001) return originDistance >= 0.0;
+	float crossing = -originDistance / raySlope;
+	if (raySlope > 0.0) nearT = max(nearT, crossing);
+	else farT = min(farT, crossing);
+	return farT > nearT;
+}
+
+float VolumeWorldRaySpeed(vec3 ray, vec3 floorRow, float metricDelta)
+{
+	float verticalSpeed = dot(floorRow, ray);
+	return sqrt(max(1.0 + metricDelta * verticalSpeed * verticalSpeed, 1.0e-12));
+}
+
+vec4 VolumeParticleColor()
+{
+	vec3 ray = normalize(gradientdist);
+	float nearT = 0.0, farT = 1.0e10;
+	if (uParticleParams.y > 0.0)
+	{
+		ivec2 size = textureSize(SceneLinearDepth, 0);
+		ivec2 texel = clamp(ivec2(gl_FragCoord.xy * uSceneDepthMap.xy + uSceneDepthMap.zw), ivec2(0), size - 1);
+		float sceneDepth = texelFetch(SceneLinearDepth, texel, 0).r;
+		farT = sceneDepth / max(-ray.z, 0.000001);
+	}
+	if (!ClipVolumeHalfspace(vWorldNormal.w, dot(vWorldNormal.xyz, ray), nearT, farT)
+		|| !ClipVolumeHalfspace(vVolumeParams.y, dot(vLightmap, ray), nearT, farT)) return vec4(0.0);
+	vec3 p = vec3(vVolumeRow0.w, vVolumeRow1.w, vVolumeRow2.w);
+	vec3 b = vec3(dot(vVolumeRow0.xyz, ray), dot(vVolumeRow1.xyz, ray), dot(vVolumeRow2.xyz, ray));
+	float worldSpeed = VolumeWorldRaySpeed(ray, vLightmap, vVolumeParams.w);
+	float tau = VolumeChordIntegral(p, b, nearT, farT, vVolumeParams.x * worldSpeed);
+	return vec4(vColor.rgb, 1.0 - exp(-min(tau, 80.0)));
+}
+
 vec4 ParticleColor()
 {
 	vec2 c = vTexCoord.xy;
 	float seed = vTexCoord.z;
 	float shape = vTexCoord.w;
+	if (shape > 11.5 && shape < 13.5) return VolumeParticleColor();
 	float r2 = dot(c, c);
 	float a;
 	vec3 rgb = vColor.rgb;
@@ -1272,17 +1814,60 @@ vec4 ParticleColor()
 	}
 	else if (shape < 1.5) // smoke: billowing edge, lit from above
 	{
-		vec2 p = c * 2.2 + seed * 37.0;
-		float n = ParticleNoise(p) * 0.6 + ParticleNoise(p * 2.3 + 11.0) * 0.4;
-		a = smoothstep(1.0, 0.25, r2 + (n - 0.5) * 0.7);
-		rgb *= 0.8 + 0.35 * (c.y * 0.5 + 0.5) + 0.15 * (n - 0.5);
+		if (uMaterialParams.z > 0.5) // retain the existing additive muzzle-flame profile
+		{
+			vec2 p = c * 2.2 + seed * 37.0 + vec2(0.18, -0.3) * vLightmap.y;
+			float n = ParticleNoise(p) * 0.6 + ParticleNoise(p * 2.3 + 11.0) * 0.4;
+			a = 1.0 - smoothstep(0.25, 1.0, r2 + (n - 0.5) * 0.7);
+			rgb *= 0.8 + 0.35 * (c.y * 0.5 + 0.5) + 0.15 * (n - 0.5);
+		}
+		else
+		{
+			// Counter-moving density scales give each puff rolling lobes and dark
+			// folds. Reuse two noise samples: cloud volume needs no extra textures,
+			// lighting passes or per-fragment noise octaves.
+			vec2 drift = vec2(0.24, -0.38) * vLightmap.y;
+			vec2 p = c * 2.2 + seed * 37.0;
+			float broad = ParticleNoise(p + drift);
+			float fine = ParticleNoise(p * 2.3 + 11.0 - drift * 1.3);
+			float n = broad * 0.65 + fine * 0.35;
+			a = (1.0 - smoothstep(0.18, 1.0, r2 + (n - 0.5) * 0.8)) *
+				mix(0.68, 1.0, smoothstep(0.2, 0.8, n));
+			rgb *= 0.64 + 0.4 * (c.y * 0.5 + 0.5) + 0.28 * broad;
+		}
 	}
 	else if (shape < 2.5) // chunk: irregular hard-edged polygon with a shaded face
 	{
-		float ang = atan(c.y, c.x);
-		float edge = 0.55 + 0.35 * ParticleNoise(vec2(ang * 1.3 + seed * 50.0, seed * 7.0));
-		a = 1.0 - smoothstep(edge - 0.08, edge, sqrt(r2));
-		rgb *= 0.75 + 0.45 * clamp(0.5 + 0.5 * dot(c, vec2(-0.6, 0.8)), 0.0, 1.0);
+		// Distinct triangular splinters, thin slabs and broken five-sided
+		// aggregate. Per-chip skew and aspect keep debris from reading as a
+		// cloud of identical square confetti. Only cheap fracture planes are
+		// evaluated here; no per-fragment angle or noise lookup is needed.
+		float variation = fract(seed * 17.37);
+		vec2 q = c;
+		q.x += q.y * (fract(seed * 29.13) - 0.5) * 0.7;
+		q.y *= 0.85 + fract(seed * 53.71) * 0.65;
+		float edge;
+		if (variation < 0.4)
+			edge = max(-q.y, max(dot(q, vec2(0.95, 0.52)), dot(q, vec2(-0.72, 0.68))));
+		else if (variation < 0.7)
+		{
+			q.y *= 1.65;
+			edge = max(max(q.x + q.y * 0.16, -q.x + q.y * 0.25), max(q.y * 0.85, -q.y));
+			edge = max(edge, dot(q, vec2(0.76, 0.73)));
+		}
+		else
+		{
+			edge = max(max(dot(q, vec2(0.85, 0.45)), dot(q, vec2(-0.7, 0.65))),
+				max(dot(q, vec2(0.6, -0.8)), dot(q, vec2(-0.8, -0.4))));
+			edge = max(edge, q.y * 0.96 + q.x * 0.08);
+		}
+		float limit = 0.53 + fract(seed * 41.3) * 0.22;
+		float aa = max(fwidth(edge), 0.012);
+		a = 1.0 - smoothstep(limit - aa, limit + aa, edge);
+		float face = dot(q, vec2(-0.45, 0.8));
+		float facet = face > 0.18 ? 1.04 : q.x + q.y * 0.35 > seed * 0.3 ? 0.86 : 0.65;
+		float bevel = smoothstep(limit - 0.045, limit - 0.01, edge) * 0.3;
+		rgb *= mix(facet, 0.98, bevel) * (0.78 + vLightmap.z * 0.22);
 	}
 	else if (shape < 3.5) // droplet: dense with a specular glint
 	{
@@ -1330,7 +1915,8 @@ void main()
 		// Soft against the opaque scene: per draw for the weather, scaled by size
 		// for particles. Solid chunks and droplets stay hard so they can lie on the floor.
 		bool solid = vTexCoord.w > 1.5 && vTexCoord.w < 3.5;
-		frag.a *= SoftDepthFade(weather ? uParticleParams2.w * vLightmap.x : (uParticleParams.x > 0.0 && !solid ? max(glowdist.y * 2.0, uParticleParams.x) : 0.0));
+		bool volume = vTexCoord.w > 11.5 && vTexCoord.w < 13.5;
+		if (!volume) frag.a *= SoftDepthFade(weather ? uParticleParams2.w * vLightmap.x : (uParticleParams.x > 0.0 && !solid ? max(glowdist.y * 2.0, uParticleParams.x) : 0.0));
 		if (uFogEnabled != 0)
 		{
 			float fogfactor = exp2(uFogDensity * max(16.0, pixelpos.w));
@@ -1353,7 +1939,7 @@ void main()
 		return;
 	}
 
-	gPuddle = HasFeature(RF_MODERN_LIGHT) ? PuddleMask(0.5) : 0.0;
+	gPuddle = !IsPBRSprite() && HasFeature(RF_MODERN_LIGHT) ? PuddleMask(0.5) : 0.0;
 
 #ifndef LEGACY_USER_SHADER
 	Material material;
@@ -1411,6 +1997,11 @@ void main()
 		{
 			frag = getLightColor(material, fogdist, fogfactor);
 
+#ifdef SUN_LIGHT
+			// The sun, in linear space after the light clamps like the lightning below.
+			if (SunActive()) frag.rgb = AddSun(frag.rgb, SunLight(material), fogfactor);
+#endif
+
 			// Lightning: a brief sky light on everything under open sky. It is
 			// added after the light clamps so that a strike can reach the bloom.
 			if (uWeatherParams.y > 0.0)
@@ -1444,6 +2035,8 @@ void main()
 		frag.rgb = frag.rgb + uFogColor.rgb;
 	}
 	if (uParticleParams.x > 0.0) frag.a *= SoftDepthFade(uParticleParams.x);
+	if (IsPBRSprite() && uMaterialParams.y > 0.5)
+		frag.rgb = SpriteDebugMaterial(material);
 	FragColor = frag;
 
 #ifdef DITHERTRANS
@@ -1474,7 +2067,11 @@ void main()
 		vec3 eyeNormal = vEyeNormal.xyz;
 		if (gReflectivity > 0.0 && dot(gReflectNormal, gReflectNormal) > 0.5)
 			eyeNormal = normalize((NormalViewMatrix * vec4(gReflectNormal, 1.0)).xyz);
-		FragFog = vec4(AmbientOcclusionColor(), EncodeReflection(gReflectivity, gRoughness));
+		// Sprite probe reflections are already shaded in the material pass.
+		// Keep the current packed G-buffer format, with zero SSR reflectivity.
+		if (IsPBRSprite())
+			eyeNormal = SafeNormal((NormalViewMatrix * vec4(material.Normal, 0.0)).xyz, vec3(0.0, 0.0, 1.0));
+		FragFog = vec4(AmbientOcclusionColor(), EncodeReflection(IsPBRSprite() ? 0.0 : gReflectivity, gRoughness));
 		// The normal's alpha is the TAA reactive mask: 0 keeps history, 1 ignores it.
 		FragNormal = vec4(eyeNormal * 0.5 + 0.5, uSurfaceParams.x);
 	}
@@ -1488,7 +2085,8 @@ void main()
 		{
 			float cover = FragColor.a >= 0.5 ? 1.0 : 0.0;
 			FragFog = vec4(AmbientOcclusionColor(), cover);
-			FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, cover * uSurfaceParams.x);
+			vec3 eyeNormal = IsPBRSprite() ? SafeNormal((NormalViewMatrix * vec4(material.Normal, 0.0)).xyz, vec3(0.0, 0.0, 1.0)) : vEyeNormal.xyz;
+			FragNormal = vec4(eyeNormal * 0.5 + 0.5, cover * uSurfaceParams.x);
 		}
 		else
 		{

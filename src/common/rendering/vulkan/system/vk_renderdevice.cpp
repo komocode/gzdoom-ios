@@ -496,6 +496,18 @@ bool VulkanRenderDevice::InitWeatherMap(int width, int height, TArray<uint16_t>&
 	return true;
 }
 
+bool VulkanRenderDevice::InitSunShadowMap(int width, int height, const float* depth)
+{
+	GetTextureManager()->SetSunShadowMap(width, height, depth);
+	return true;
+}
+
+void VulkanRenderDevice::PrecacheSunShaders(const TArray<int> &userShaders)
+{
+	// The pass the main view draws with; the other pass's variants compile when first drawn.
+	mShaderManager->PrecacheSunShaders(PPAmbientOcclusion::GBufferNeeded() ? GBUFFER_PASS : NORMAL_PASS, userShaders);
+}
+
 void VulkanRenderDevice::Draw2D()
 {
 	::Draw2D(twod, *mRenderState);

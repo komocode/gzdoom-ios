@@ -344,6 +344,43 @@ struct FWeatherSettings
 	uint32_t Color = 0;			// tint; 0 = default (cool grey rain, white snow)
 };
 
+// Opt-in map atmosphere (MAPINFO gisky, gimoon, rainscatter, volumetricstrength,
+// ssrstretch, forceheightfog, forcebloom). Maps without these keys render as
+// before. The overrides never write the user's CVARs; r_map_atmosphere 0 ignores
+// the last three.
+struct FMapAtmosphereInfo
+{
+	bool GISky = false;				// gisky: replaces the sky texture's average colour in the GI bake
+	uint32_t GISkyColor = 0;
+	float GISkyIntensity = 1.f;
+	uint32_t GIMoonColor = 0;		// gimoon: directional lobe added to GI rays that hit the sky
+	float GIMoonIntensity = 0.f;	// 0: no moon
+	float GIMoonYaw = 0.f;			// degrees, map space: 0 east (+x), 90 north (+y)
+	float GIMoonPitch = 45.f;		// degrees above the horizon
+	float GIMoonExponent = 32.f;	// lobe sharpness
+	float RainScatter = 0.f;		// extra volumetric scattering per unit of rain density
+	float VolumetricStrength = 1.f;	// volumetricstrength: multiplies r_volumetric_strength (in-scattered light only)
+	float SSRStretch = 0.f;			// > 0 replaces r_ssr_stretch
+	bool ForceHeightFog = false;	// height fog even with r_heightfog off (needs r_volumetric)
+	bool ForceBloom = false;		// bloom even with gl_bloom off
+};
+
+// Directional sun light with a baked shadow map (hw_sun.h). MAPINFO sun,
+// sunbounce and sunspecular give a level's starting values; ZScript can change
+// them (LevelLocals.SetSun, SetSunColor) and savegames keep them. Maps without
+// a sun key have no sun and pay nothing for it.
+struct FSunSettings
+{
+	bool Enabled = false;
+	float Yaw = 0.f;			// degrees, map space: 0 east (+x), 90 north (+y)
+	float Elevation = 45.f;		// degrees above the horizon
+	uint32_t Color = 0xffffff;	// sRGB
+	float Intensity = 1.f;		// linear multiplier
+	float Softness = 1.5f;		// PCF radius in shadow map texels
+	float Bounce = 1.f;			// sunbounce: scale of the sunlight in the GI bake
+	float Specular = 1.f;		// sunspecular: scale of the sun's highlights
+};
+
 struct level_info_t
 {
 	int			levelnum;
@@ -417,6 +454,8 @@ struct level_info_t
 	uint32_t	heightfogcolor;
 	DVector2	heightfogwind;
 	FWeatherSettings weather;
+	FMapAtmosphereInfo atmosphere;
+	FSunSettings sun;
 
 	// Redirection: If any player is carrying the specified item, then
 	// you go to the RedirectMap instead of this one.

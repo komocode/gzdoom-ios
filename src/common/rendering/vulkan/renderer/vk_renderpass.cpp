@@ -255,7 +255,7 @@ std::unique_ptr<VulkanPipeline> VkRenderPassSetup::CreatePipeline(const VkPipeli
 		program = fb->GetShaderManager()->Get(key.EffectState, key.AlphaTest, PassKey.DrawBuffers > 1 ? GBUFFER_PASS : NORMAL_PASS);
 	}
 	builder.AddVertexShader(program->vert.get());
-	builder.AddFragmentShader(program->frag.get());
+	builder.AddFragmentShader(key.SunShading ? fb->GetShaderManager()->GetSunFragment(program) : program->frag.get());
 
 	const VkVertexFormat &vfmt = *fb->GetRenderPassManager()->GetVertexFormat(key.VertexFormat);
 

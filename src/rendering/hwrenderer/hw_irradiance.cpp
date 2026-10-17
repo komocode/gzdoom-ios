@@ -32,6 +32,8 @@
 #include <pthread.h>
 #endif
 
+EXTERN_CVAR(Bool, r_sun)
+
 namespace
 {
 
@@ -59,6 +61,7 @@ enum
 {
 	TRI_TWOSIDED = 1,	// masked mid textures and models: seen from both sides
 	TRI_NOSHADOW = 2,	// models carrying lights don't shadow them
+	TRI_SKY = 4,		// sky surfaces: open to the sun
 };
 
 struct Triangle
@@ -68,8 +71,68 @@ struct Triangle
 	int flags;
 };
 
+// Directional radiance is kept separate from the cosine-filtered diffuse GI.
+// Four roughness levels occupy bordered octahedral tiles in the same GPU array.
+constexpr int ReflectionResolution = 16;
+constexpr int ReflectionBordered = ReflectionResolution + 2;
+constexpr int ReflectionTile = ReflectionBordered * 2;
+constexpr int ReflectionLevels = 4;
+constexpr int MaxReflectionProbes = 128;
+constexpr size_t MaxReflectionTextureBytes = 16 * 1024 * 1024;
+
+Vec3 LinearColor(const Vec3 &c)
+{
+	return { std::pow(std::max(c.x, 0.f), 2.2f), std::pow(std::max(c.y, 0.f), 2.2f), std::pow(std::max(c.z, 0.f), 2.2f) };
+}
+
+// Linear radiance (as LinearColor, power 2.2) that a sky lobe of the given
+// peak and exponent adds over an encoded sky brightness b, integrated over
+// the angle from its axis: the energy of MAPINFO gimoon in reflection probes.
+float LobeLinearEnergy(float b, float peak, float exponent)
+{
+	const int steps = 256;
+	// cos^n is below 1e-7 beyond about 6 / sqrt(n) radians.
+	double range = std::min(M_PI / 2, 6.0 / std::sqrt(exponent)), base = std::pow(b, 2.2), sum = 0.0;
+	for (int i = 0; i < steps; i++)
+	{
+		double theta = (i + 0.5) * range / steps;
+		sum += (std::pow(b + peak * std::pow(std::cos(theta), exponent), 2.2) - base) * std::sin(theta);
+	}
+	return float(sum * range / steps);
+}
+
+Vec3 OctaDirection(float u, float v)
+{
+	Vec3 n(u, v, 1.f - std::abs(u) - std::abs(v));
+	float fold = std::max(-n.z, 0.f);
+	n.x += n.x >= 0.f ? -fold : fold;
+	n.y += n.y >= 0.f ? -fold : fold;
+	return Normalize(n);
+}
+
+struct ReflectionTexel
+{
+	Vec3 albedo, emissive;
+	float lit = 1.f;
+};
+
+struct ReflectionTexture
+{
+	int width = 0, height = 0;
+	std::vector<ReflectionTexel> pixels;
+};
+
+struct ReflectionProbe
+{
+	bool valid = false;
+	std::vector<Vec3> pixels;
+};
+
 struct Material
 {
+	int reflectionTexture = -1;
+	Vec3 textureU, textureV;
+	float offsetU = 0.f, offsetV = 0.f;
 	Vec3 albedo;
 	Vec3 light;	// sector light level * light color
 	Vec3 emissive;	// fullbright and brightmapped texels
@@ -117,7 +180,8 @@ public:
 		centroids.shrink_to_fit();
 	}
 
-	bool Intersect(const Vec3 &origin, const Vec3 &dir, float maxT, Hit &hit, bool anyHit) const
+	// skip: triangle flags that this ray passes through.
+	bool Intersect(const Vec3 &origin, const Vec3 &dir, float maxT, Hit &hit, bool anyHit, int skip = 0) const
 	{
 		if (nodes.empty()) return false;
 		Vec3 inv = { 1.f / (std::abs(dir.x) > 1e-8f ? dir.x : 1e-8f), 1.f / (std::abs(dir.y) > 1e-8f ? dir.y : 1e-8f), 1.f / (std::abs(dir.z) > 1e-8f ? dir.z : 1e-8f) };
@@ -137,7 +201,7 @@ public:
 					int ti = indices[node.start + i];
 					float t;
 					const Triangle &tri = (*triangles)[ti];
-					if (anyHit && (tri.flags & TRI_NOSHADOW)) continue;
+					if (tri.flags & skip) continue;
 					if (IntersectTriangle(tri, origin, dir, t) && t < hit.t)
 					{
 						hit.t = t;
@@ -253,6 +317,9 @@ struct BakeJob
 	std::vector<Triangle> triangles;
 	std::vector<Material> materials;
 	std::vector<StaticLight> lights;
+	std::vector<ReflectionTexture> reflectionTextures;
+	std::unordered_map<int, int> reflectionTextureIDs;
+	size_t reflectionTextureBytes = 0;
 	BVH bvh;
 
 	// Light lookup grid in the XY plane
@@ -269,6 +336,77 @@ struct BakeJob
 	std::vector<Probe> probes;
 	int raysPerProbe = 96;
 	float albedoNormalize = 1.f;
+
+	// MAPINFO gimoon: a directional lobe on rays that hit the sky, in the same
+	// encoded space as the sky radiance. Each bake widens lobes sharper than
+	// its ray density can resolve, keeping their energy (scale: encoded for the
+	// diffuse probes, linear for the reflection texels), so probes don't flicker
+	// between catching and missing the moon.
+	float moonIntensity = 0.f;
+	Vec3 moonDir, moonColor;
+	float moonExponent = 1.f, moonScale = 1.f;	// diffuse probes
+	float moonReflectionExponent = 1.f, moonReflectionScale = 1.f;
+
+	// MAPINFO sun (hw_sun.h): direct sunlight at ray hits, linear colour *
+	// intensity * sunbounce, when a shadow ray toward the sun leaves the level.
+	Vec3 sunDir, sunColor;
+	bool sun = false;
+
+	Vec3 reflectionOrigin;
+	float reflectionSpacing = 256.f;
+	int reflectionX = 0, reflectionY = 0, reflectionZ = 0;
+	std::vector<float> reflectionFloor, reflectionCeiling;
+	std::vector<ReflectionProbe> reflectionProbes;
+	std::atomic<int> nextReflection{ 0 };
+
+	// Called on the main thread. Workers only access this bounded snapshot;
+	// texture decoders and TexMan must never be touched by bake threads.
+	int CaptureReflectionTexture(FTextureID id)
+	{
+		if (!id.isValid()) return -1;
+		auto found = reflectionTextureIDs.find(id.GetIndex());
+		if (found != reflectionTextureIDs.end()) return found->second;
+		int result = -1;
+		auto game = TexMan.GetGameTexture(id, false);
+		if (game && game->isValid() && game->GetTexture() && !game->isHardwareCanvas())
+		{
+			FBitmap bitmap = game->GetTexture()->GetBgraBitmap(nullptr);
+			int w = bitmap.GetWidth(), h = bitmap.GetHeight();
+			if (bitmap.GetPixels() && w > 0 && h > 0)
+			{
+				ReflectionTexture texture;
+				texture.width = std::min(w, 64); texture.height = std::min(h, 64);
+				size_t bytes = size_t(texture.width) * texture.height * sizeof(ReflectionTexel);
+				if (reflectionTextureBytes + bytes <= MaxReflectionTextureBytes)
+				{
+					FBitmap brightmap;
+					bool fullbright = game->isFullbright();
+					if (!fullbright && game->GetBrightmap()) brightmap = game->GetBrightmap()->GetBgraBitmap(nullptr);
+					bool hasBrightmap = brightmap.GetPixels() && brightmap.GetWidth() > 0 && brightmap.GetHeight() > 0;
+					texture.pixels.resize(size_t(texture.width) * texture.height);
+					for (int y = 0; y < texture.height; y++) for (int x = 0; x < texture.width; x++)
+					{
+						const uint8_t *pixel = bitmap.GetPixels() + (y * h / texture.height) * bitmap.GetPitch() + (x * w / texture.width) * 4;
+						float emission = fullbright ? 1.f : 0.f;
+						if (hasBrightmap)
+						{
+							const uint8_t *bp = brightmap.GetPixels() + (y * brightmap.GetHeight() / texture.height) * brightmap.GetPitch() + (x * brightmap.GetWidth() / texture.width) * 4;
+							emission = (bp[0] + bp[1] + bp[2]) / (3.f * 255.f);
+						}
+						ReflectionTexel &texel = texture.pixels[y * texture.width + x];
+						texel.albedo = LinearColor(Vec3(pixel[2], pixel[1], pixel[0]) * (1.f / 255.f));
+						texel.emissive = texel.albedo * emission;
+						texel.lit = 1.f - emission;
+					}
+					reflectionTextureBytes += bytes;
+					result = int(reflectionTextures.size());
+					reflectionTextures.push_back(std::move(texture));
+				}
+			}
+		}
+		reflectionTextureIDs[id.GetIndex()] = result;
+		return result;
+	}
 
 	std::atomic<int> nextSlice{ 0 };
 	std::atomic<int> finishedSlices{ 0 };
@@ -287,10 +425,18 @@ struct BakeJob
 
 	int ProbeIndex(int x, int y, int z) const { return (z * sizeY + y) * sizeX + x; }
 
-	Vec3 ShadeHit(const Vec3 &pos, const Triangle &tri, const Vec3 &normal) const
+	Vec3 ShadeHit(const Vec3 &pos, const Vec3 &rayDir, const Triangle &tri, const Vec3 &normal, bool reflection = false) const
 	{
 		const Material &m = materials[tri.material];
-		if (m.sky) return m.light;
+		if (m.sky)
+		{
+			if (moonIntensity <= 0.f) return reflection ? LinearColor(m.light) : m.light;
+			// The moon is part of the sky radiance, so reflections linearise both together.
+			Vec3 sky = m.light;
+			float c = Dot(rayDir, moonDir);
+			if (c > 0.f) sky += moonColor * (moonIntensity * (reflection ? moonReflectionScale * std::pow(c, moonReflectionExponent) : moonScale * std::pow(c, moonExponent)));
+			return reflection ? LinearColor(sky) : sky;
+		}
 		Vec3 light = m.light, added;
 		int gx = int((pos.x - lightGridOrigin.x) / lightCell);
 		int gy = int((pos.y - lightGridOrigin.y) / lightCell);
@@ -316,7 +462,7 @@ struct BakeJob
 				}
 				Hit shadow;
 				Vec3 start = pos + normal * 0.5f;
-				if (bvh.Intersect(start, dir, dist - 1.f, shadow, true)) continue;
+				if (bvh.Intersect(start, dir, dist - 1.f, shadow, true, TRI_NOSHADOW)) continue;
 				// Doom lights fall off linearly. Lambert is used for the bounce so
 				// grazing surfaces reflect less light back into the room.
 				float attenuation = (1.f - dist / l.radius) * (0.35f + 0.65f * facing) * cone;
@@ -324,7 +470,35 @@ struct BakeJob
 				else light += l.color * attenuation;
 			}
 		}
-		return m.albedo * light * m.lit + m.emissive + added;
+		// Sunlight, in the scene's gamma 2 space: diffuse probes hold encoded
+		// light, so it adds to the light's square.
+		Vec3 sunlight;
+		if (sun)
+		{
+			float facing = Dot(normal, sunDir);
+			Hit blocked;
+			if (facing > 0.f && !bvh.Intersect(pos + normal * 0.5f, sunDir, 65536.f, blocked, true, TRI_SKY))
+				sunlight = sunColor * facing;
+		}
+		if (!reflection)
+		{
+			if (sun) light = Vec3(std::sqrt(light.x * light.x + sunlight.x), std::sqrt(light.y * light.y + sunlight.y), std::sqrt(light.z * light.z + sunlight.z));
+			return m.albedo * light * m.lit + m.emissive + added;
+		}
+		Vec3 albedo = LinearColor(m.albedo), emissive = LinearColor(m.emissive);
+		float lit = m.lit;
+		if (m.reflectionTexture >= 0)
+		{
+			const ReflectionTexture &texture = reflectionTextures[m.reflectionTexture];
+			float u = Dot(pos, m.textureU) + m.offsetU, v = Dot(pos, m.textureV) + m.offsetV;
+			int x = std::min(int((u - std::floor(u)) * texture.width), texture.width - 1);
+			int y = std::min(int((v - std::floor(v)) * texture.height), texture.height - 1);
+			const ReflectionTexel &texel = texture.pixels[y * texture.width + x];
+			albedo = texel.albedo;
+			emissive = texel.emissive;
+			lit = texel.lit;
+		}
+		return albedo * (LinearColor(light) + sunlight) * lit + emissive + LinearColor(added);
 	}
 
 	void BakeProbe(int x, int y, int z, uint32_t seed)
@@ -365,7 +539,7 @@ struct BakeJob
 					}
 					normal = normal * -1.f;
 				}
-				radiance = ShadeHit(pos + dir * hit.t, tri, normal);
+				radiance = ShadeHit(pos + dir * hit.t, dir, tri, normal);
 			}
 			float w;
 			if ((w = dir.x) > 0) { sum[0] += radiance * w; weight[0] += w; } else { sum[1] += radiance * -w; weight[1] -= w; }
@@ -377,6 +551,68 @@ struct BakeJob
 		for (int f = 0; f < 6; f++)
 			probe.face[f] = weight[f] > 0 ? sum[f] * (albedoNormalize / weight[f]) : Vec3();
 		probe.valid = true;
+	}
+
+	void BakeReflection(int index)
+	{
+		int x = index % reflectionX, y = (index / reflectionX) % reflectionY, z = index / (reflectionX * reflectionY);
+		int column = y * reflectionX + x;
+		float floorZ = reflectionFloor[column], ceilZ = reflectionCeiling[column];
+		float pz = reflectionOrigin.z + z * reflectionSpacing;
+		if (ceilZ - floorZ < 8.f || pz < floorZ - reflectionSpacing || pz > ceilZ + reflectionSpacing) return;
+		Vec3 pos(reflectionOrigin.x + x * reflectionSpacing, reflectionOrigin.y + y * reflectionSpacing,
+			std::clamp(pz, floorZ + 4.f, ceilZ - 4.f));
+		ReflectionProbe &probe = reflectionProbes[index];
+		const int samples = ReflectionResolution * ReflectionResolution;
+		Vec3 radiance[samples], directions[samples];
+		float solidAngle[samples];
+		int backfaces = 0, hits = 0;
+		for (int py = 0; py < ReflectionResolution && !cancel; py++) for (int px = 0; px < ReflectionResolution; px++)
+		{
+			int i = py * ReflectionResolution + px;
+			Vec3 dir = OctaDirection((px + 0.5f) * (2.f / ReflectionResolution) - 1.f, (py + 0.5f) * (2.f / ReflectionResolution) - 1.f);
+			directions[i] = dir;
+			// Octahedral texels subtend different solid angles. Weight the
+			// prefilter by the Jacobian so corners do not bias rough reflections.
+			float l1 = std::abs(dir.x) + std::abs(dir.y) + std::abs(dir.z);
+			solidAngle[i] = l1 * l1 * l1;
+			Hit hit;
+			if (bvh.Intersect(pos, dir, 8192.f, hit, false))
+			{
+				hits++;
+				const Triangle &tri = triangles[hit.tri];
+				Vec3 normal = tri.normal;
+				if (Dot(normal, dir) > 0.f && !materials[tri.material].sky)
+				{
+					if (!(tri.flags & TRI_TWOSIDED)) { backfaces++; continue; }
+					normal = normal * -1.f;
+				}
+				radiance[i] = ShadeHit(pos + dir * hit.t, dir, tri, normal, true);
+			}
+		}
+		if (cancel || hits == 0 || backfaces * 4 > hits) return;
+		probe.pixels.resize(ReflectionLevels * samples);
+		for (int level = 0; level < ReflectionLevels && !cancel; level++)
+		{
+			float roughness = float(level) / (ReflectionLevels - 1);
+			float exponent = 2.f / std::max(roughness * roughness, 0.001f) - 2.f;
+			for (int i = 0; i < samples && !cancel; i++)
+			{
+				if (!level) { probe.pixels[i] = radiance[i]; continue; }
+				Vec3 sum;
+				float weight = 0.f;
+				for (int j = 0; j < samples; j++)
+				{
+					float cosine = Dot(directions[i], directions[j]);
+					if (cosine <= 0.f) continue;
+					float w = std::pow(cosine, exponent) * solidAngle[j];
+					sum += radiance[j] * w;
+					weight += w;
+				}
+				probe.pixels[level * samples + i] = weight > 0.f ? sum * (1.f / weight) : Vec3();
+			}
+		}
+		probe.valid = !cancel;
 	}
 
 	void Worker()
@@ -393,6 +629,12 @@ struct BakeJob
 			for (int x = 0; x < sizeX && !cancel; x++)
 				BakeProbe(x, y, z, uint32_t(x * 73856093u ^ y * 19349663u ^ z * 83492791u));
 			finishedSlices++;
+		}
+		while (!cancel)
+		{
+			int index = nextReflection++;
+			if (index >= int(reflectionProbes.size())) break;
+			BakeReflection(index);
 		}
 	}
 
@@ -435,7 +677,8 @@ struct BakeJob
 std::unique_ptr<BakeJob> job;
 bool volumeUploaded;
 bool bakeRequested;
-FVector4 volumeOrigin, volumeSize;
+FVector4 volumeOrigin = { 0, 0, 0, 1 }, volumeSize = { 0, 0, 0, 0 };
+FVector4 reflectionOrigin = { 0, 0, 0, 1 }, reflectionSize = { 0, 0, 0, 0 }, reflectionAtlas = { 0, 0, 0, 0 };
 
 struct TextureInfo
 {
@@ -644,6 +887,13 @@ void CaptureAndStart(FLevelLocals *level)
 		if (lum > 1.f) sky = sky * (1.f / lum);
 		else if (lum < 0.03f) sky = lum > 0.f ? sky * (0.03f / lum) : Vec3(0.03f, 0.03f, 0.03f);
 	}
+	// MAPINFO gisky replaces the derived radiance; sky fog still blends it below.
+	const FMapAtmosphereInfo &atmosphere = level->atmosphere;
+	if (atmosphere.GISky)
+	{
+		PalEntry c = atmosphere.GISkyColor;
+		sky = Vec3(c.r / 255.f, c.g / 255.f, c.b / 255.f) * atmosphere.GISkyIntensity;
+	}
 	float skyFog = std::clamp(level->skyfog, 0, 255) / 255.f;
 
 	// One material per surface.
@@ -652,11 +902,12 @@ void CaptureAndStart(FLevelLocals *level)
 	{
 		const Surface &s = mesh->Surfaces[i];
 		Material m = {};
+		FTextureID textureID = s.texture;
 		m.sky = s.bSky;
-		const TextureInfo &tex = GetTextureInfo(s.texture);
-		m.albedo = tex.albedo;
-		m.emissive = tex.emissive;
-		m.lit = tex.lit;
+		const TextureInfo &texinfo = GetTextureInfo(textureID);
+		m.albedo = texinfo.albedo;
+		m.emissive = texinfo.emissive;
+		m.lit = texinfo.lit;
 		sector_t *sector = s.sector;
 		if (s.type == ST_FLOOR || s.type == ST_CEILING)
 			m.light = LightColor(sector, s.type == ST_FLOOR ? sector->GetFloorLight() : sector->GetCeilingLight());
@@ -665,12 +916,62 @@ void CaptureAndStart(FLevelLocals *level)
 		if (m.sky)
 		{
 			m.light = sky;
-			// Sky fog blends the sky towards the sector's fog colour, as the sky renderer does.
+			// Keep the newer sky-fog contribution for both diffuse and reflection probes.
 			PalEntry fade = sector->Colormap.FadeColor;
 			if (skyFog > 0.f && (fade & 0xffffff) != 0)
 			{
 				Vec3 fog = { fade.r / 255.f, fade.g / 255.f, fade.b / 255.f };
 				m.light = sky * (1.f - skyFog) + fog * skyFog;
+			}
+		}
+		else if (r_sprite_pbr && r_sprite_reflections && s.type != ST_MODEL)
+		{
+			// The mesh carries the correct texture for 3D floors and masked walls.
+			// Models have no captured UVs, so retain their material-average radiance.
+			auto tex = TexMan.GetGameTexture(textureID, false);
+			if (tex && tex->isValid())
+			{
+				if (s.type == ST_FLOOR || s.type == ST_CEILING)
+				{
+					sector_t *mapping = s.controlSector ? s.controlSector : sector;
+					bool floor = s.type == ST_FLOOR;
+					int plane = floor ? (s.controlSector ? sector_t::ceiling : sector_t::floor) : (s.controlSector ? sector_t::floor : sector_t::ceiling);
+					float angle = float(-mapping->GetAngle(plane).Radians());
+					float c = std::cos(angle), sn = std::sin(angle);
+					float us = float(mapping->GetXScale(plane)) / std::max(tex->GetDisplayWidth(), 1.f);
+					float vs = float(mapping->GetYScale(plane)) / std::max(tex->GetDisplayHeight(), 1.f);
+					m.textureU = { c * us, sn * us, 0.f };
+					m.textureV = { sn * vs, -c * vs, 0.f };
+					m.offsetU = float(mapping->GetXOffset(plane)) * us;
+					m.offsetV = float(mapping->GetYOffset(plane)) * vs;
+				}
+				else
+				{
+					side_t *side = &level->sides[s.typeIndex];
+					int part = s.type == ST_UPPERWALL ? side_t::top : s.type == ST_LOWERWALL ? side_t::bottom : side_t::mid;
+					FTexCoordInfo tci;
+					tci.GetFromTexture(tex, float(side->GetTextureXScale(part)), float(side->GetTextureYScale(part)), !!(level->flags3 & LEVEL3_FORCEWORLDPANNING));
+					DVector2 start = side->V1()->fPos(), delta = side->V2()->fPos() - start;
+					float length = float(delta.Length());
+					float us = length > 0.f ? side->TexelLength / (length * std::max(std::abs(tci.mRenderWidth), 1)) : 0.f;
+					Vec3 along = length > 0.f ? Vec3(float(delta.X), float(delta.Y), 0.f) * (1.f / length) : Vec3();
+					m.textureU = along * us;
+					m.offsetU = tci.FloatToTexU(tci.TextureOffset(float(side->GetTextureXOffset(part)))) - Dot(Vec3(float(start.X), float(start.Y), 0.f), m.textureU);
+					// Static affine wall mapping: sloped/skewed midtextures and
+					// 3D-floor side offsets remain an approximation.
+					sector_t *front = side->sector;
+					sector_t *back = side->linedef->frontsector == front ? side->linedef->backsector : side->linedef->frontsector;
+					float top = float(front->ceilingplane.ZatPoint(start));
+					if (part == side_t::top && back && !(side->linedef->flags & ML_DONTPEGTOP))
+						top = float(back->ceilingplane.ZatPoint(start)) + tci.mRenderHeight;
+					else if (part == side_t::bottom && back && !(side->linedef->flags & ML_DONTPEGBOTTOM))
+						top = float(back->floorplane.ZatPoint(start));
+					else if (part == side_t::mid && (side->linedef->flags & ML_DONTPEGBOTTOM))
+						top = float(front->floorplane.ZatPoint(start)) + tci.mRenderHeight;
+					m.textureV = { 0.f, 0.f, -1.f / std::max(std::abs(tci.mRenderHeight), 1) };
+					m.offsetV = tci.FloatToTexV(top + tci.RowOffset(float(side->GetTextureYOffset(part))));
+				}
+				m.reflectionTexture = bake->CaptureReflectionTexture(textureID);
 			}
 		}
 		surfaceMaterial[i] = (int)bake->materials.size();
@@ -694,7 +995,7 @@ void CaptureAndStart(FLevelLocals *level)
 		t.v0 = { a.X, a.Y, a.Z };
 		t.e1 = Vec3(b.X, b.Y, b.Z) - t.v0;
 		t.e2 = Vec3(c.X, c.Y, c.Z) - t.v0;
-		t.flags = (s.bTwoSided ? TRI_TWOSIDED : 0) | (s.bLightOwner ? TRI_NOSHADOW : 0);
+		t.flags = (s.bTwoSided ? TRI_TWOSIDED : 0) | (s.bLightOwner ? TRI_NOSHADOW : 0) | (s.bSky ? TRI_SKY : 0);
 		Vec3 n = Normalize(Cross(t.e1, t.e2));
 		if (s.type == ST_FLOOR) { if (n.z < 0) n = n * -1.f; }
 		else if (s.type == ST_CEILING) { if (n.z > 0) n = n * -1.f; }
@@ -810,6 +1111,49 @@ void CaptureAndStart(FLevelLocals *level)
 	spacing = std::max(spacing, extent.z / maxZ[quality]);
 	bake->spacing = spacing;
 	bake->raysPerProbe = rays[quality];
+	if (atmosphere.GIMoonIntensity > 0.f)
+	{
+		PalEntry c = atmosphere.GIMoonColor;
+		float yaw = atmosphere.GIMoonYaw * float(M_PI / 180.0), pitch = atmosphere.GIMoonPitch * float(M_PI / 180.0);
+		bake->moonIntensity = atmosphere.GIMoonIntensity;
+		bake->moonColor = Vec3(c.r / 255.f, c.g / 255.f, c.b / 255.f);
+		bake->moonDir = Vec3(std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch));
+		// A lobe of exponent n covers 1/(2(n+1)) of the sphere (2pi/(n+1) sr).
+		// Capping n+1 at 1/8 of the samples (diffuse rays or reflection texels)
+		// leaves about four samples in it, enough for the rotated Fibonacci rays
+		// to catch its energy within about 2 % on every probe. Widened lobes keep
+		// the energy: encoded for the diffuse probes, linear for reflections,
+		// which raise each texel to the power 2.2 together with the sky under
+		// the lobe, so their scale is solved for this sky's brightness.
+		float exponent = std::max(atmosphere.GIMoonExponent, 1.f);
+		bake->moonExponent = std::min(exponent, std::max(1.f, bake->raysPerProbe / 8.f - 1.f));
+		bake->moonScale = (bake->moonExponent + 1.f) / (exponent + 1.f);
+		bake->moonReflectionExponent = std::min(exponent, ReflectionResolution * ReflectionResolution / 8.f - 1.f);
+		float skyLuma = Luminance(sky), peak = bake->moonIntensity * Luminance(bake->moonColor);
+		if (bake->moonReflectionExponent < exponent && peak > 0.f)
+		{
+			// The energy grows with the scale, and the widened lobe at full scale has more.
+			float target = LobeLinearEnergy(skyLuma, peak, exponent), lo = 0.f, hi = 1.f;
+			for (int i = 0; i < 24; i++)
+			{
+				float mid = (lo + hi) * 0.5f;
+				if (LobeLinearEnergy(skyLuma, peak * mid, bake->moonReflectionExponent) < target) lo = mid;
+				else hi = mid;
+			}
+			bake->moonReflectionScale = (lo + hi) * 0.5f;
+		}
+	}
+	const FSunSettings &sunInfo = level->sun;
+	if (sunInfo.Enabled && sunInfo.Intensity > 0.f && sunInfo.Bounce > 0.f && r_sun)
+	{
+		PalEntry c = sunInfo.Color;
+		float yaw = sunInfo.Yaw * float(M_PI / 180.0), elevation = sunInfo.Elevation * float(M_PI / 180.0);
+		float scale = sunInfo.Intensity * sunInfo.Bounce;
+		bake->sun = true;
+		bake->sunDir = Vec3(std::cos(elevation) * std::cos(yaw), std::cos(elevation) * std::sin(yaw), std::sin(elevation));
+		// Linear as the scene shader takes it (gamma 2).
+		bake->sunColor = Vec3(c.r / 255.f * c.r / 255.f, c.g / 255.f * c.g / 255.f, c.b / 255.f * c.b / 255.f) * scale;
+	}
 	bake->origin = pmin;
 	bake->sizeX = std::max(2, int(std::ceil(extent.x / spacing)) + 1);
 	bake->sizeY = std::max(2, int(std::ceil(extent.y / spacing)) + 1);
@@ -827,6 +1171,35 @@ void CaptureAndStart(FLevelLocals *level)
 		bake->columnCeiling[y * bake->sizeX + x] = (float)sector->ceilingplane.ZatPoint(p);
 	}
 
+	if (r_sprite_pbr && r_sprite_reflections)
+	{
+		// A sparse reflection grid has an independent budget; never multiply
+		// the full diffuse GI grid by the angular resolution.
+		float step = std::max(192.f, std::max(extent.x / 7.f, std::max(extent.y / 7.f, extent.z / 3.f)));
+		auto count = [&] {
+			bake->reflectionX = std::max(1, int(std::ceil(extent.x / step)));
+			bake->reflectionY = std::max(1, int(std::ceil(extent.y / step)));
+			bake->reflectionZ = std::max(1, int(std::ceil(extent.z / step)));
+			return bake->reflectionX * bake->reflectionY * bake->reflectionZ;
+		};
+		while (count() > MaxReflectionProbes) step *= 1.1f;
+		bake->reflectionOrigin = pmin + Vec3(
+			(extent.x - (bake->reflectionX - 1) * step) * 0.5f,
+			(extent.y - (bake->reflectionY - 1) * step) * 0.5f,
+			(extent.z - (bake->reflectionZ - 1) * step) * 0.5f);
+		bake->reflectionSpacing = step;
+		bake->reflectionProbes.resize(count());
+		bake->reflectionFloor.resize(bake->reflectionX * bake->reflectionY);
+		bake->reflectionCeiling.resize(bake->reflectionX * bake->reflectionY);
+		for (int y = 0; y < bake->reflectionY; y++) for (int x = 0; x < bake->reflectionX; x++)
+		{
+			DVector2 p(bake->reflectionOrigin.x + x * step, bake->reflectionOrigin.y + y * step);
+			sector_t *sector = level->PointInSector(p);
+			bake->reflectionFloor[y * bake->reflectionX + x] = float(sector->floorplane.ZatPoint(p));
+			bake->reflectionCeiling[y * bake->reflectionX + x] = float(sector->ceilingplane.ZatPoint(p));
+		}
+	}
+
 	bake->bvh.Build(bake->triangles);
 
 	unsigned threads = std::max(1u, std::thread::hardware_concurrency());
@@ -842,8 +1215,16 @@ void CaptureAndStart(FLevelLocals *level)
 		raw->done = true;
 	});
 
-	DPrintf(DMSG_NOTIFY, "GI: baking %dx%dx%d probes (%.0f unit spacing, %d rays, %u triangles, %u static lights, %d spots, sky %.2f %.2f %.2f) on %u threads\n",
-		bake->sizeX, bake->sizeY, bake->sizeZ, spacing, bake->raysPerProbe, (unsigned)bake->triangles.size(), (unsigned)bake->lights.size(), spots, sky.x, sky.y, sky.z, threads);
+	FString mapSky;
+	if (atmosphere.GISky) mapSky += " from gisky";
+	if (bake->sun)
+		mapSky.AppendFormat(", sun %.2f %.2f %.2f at yaw %.0f elevation %.0f", bake->sunColor.x, bake->sunColor.y, bake->sunColor.z, level->sun.Yaw, level->sun.Elevation);
+	if (bake->moonIntensity > 0.f)
+		mapSky.AppendFormat(", gimoon %.2f %.2f %.2f x %.2f at yaw %.0f pitch %.0f, exponent %.0f (%.0f diffuse, %.0f reflections)",
+			bake->moonColor.x, bake->moonColor.y, bake->moonColor.z, bake->moonIntensity, atmosphere.GIMoonYaw, atmosphere.GIMoonPitch,
+			atmosphere.GIMoonExponent, bake->moonExponent, bake->moonReflectionExponent);
+	DPrintf(DMSG_NOTIFY, "GI: baking %dx%dx%d probes (%.0f unit spacing, %d rays, %u triangles, %u static lights, %d spots, sky %.2f %.2f %.2f%s) on %u threads\n",
+		bake->sizeX, bake->sizeY, bake->sizeZ, spacing, bake->raysPerProbe, (unsigned)bake->triangles.size(), (unsigned)bake->lights.size(), spots, sky.x, sky.y, sky.z, mapSky.GetChars(), threads);
 	job = std::move(bake);
 }
 
@@ -864,27 +1245,67 @@ uint16_t ToHalf(float f)
 void Upload()
 {
 	BakeJob &b = *job;
-	// Layer layout: layer = face * sizeZ + z, each layer is sizeX * sizeY.
+	bool hasReflections = !b.reflectionProbes.empty();
+	int width = hasReflections ? std::max(b.sizeX, ReflectionTile) : b.sizeX;
+	int height = hasReflections ? std::max(b.sizeY, ReflectionTile) : b.sizeY;
+	int tilesX = width / ReflectionTile, tilesY = height / ReflectionTile;
+	int reflectionLayers = hasReflections ? (int(b.reflectionProbes.size()) + tilesX * tilesY - 1) / (tilesX * tilesY) : 0;
+	int baseLayer = b.sizeZ * 6;
+	// Keep the combined array within the portable 256-layer budget. Expand
+	// only when necessary so thin/tiny maps do not waste diffuse volume RAM.
+	while (baseLayer + reflectionLayers > 256)
+	{
+		if (width <= height) width = (tilesX + 1) * ReflectionTile;
+		else height = (tilesY + 1) * ReflectionTile;
+		tilesX = width / ReflectionTile; tilesY = height / ReflectionTile;
+		reflectionLayers = (int(b.reflectionProbes.size()) + tilesX * tilesY - 1) / (tilesX * tilesY);
+	}
+	int layers = baseLayer + reflectionLayers;
 	TArray<uint16_t> data;
-	data.Resize(unsigned(b.sizeX * b.sizeY * b.sizeZ * 6 * 4));
-	uint16_t *out = data.Data();
-	for (int f = 0; f < 6; f++)
-		for (int z = 0; z < b.sizeZ; z++)
-			for (int y = 0; y < b.sizeY; y++)
-				for (int x = 0; x < b.sizeX; x++)
-				{
-					const Probe &p = b.probes[b.ProbeIndex(x, y, z)];
-					Vec3 c = p.valid ? p.face[f] : Vec3();
-					*out++ = ToHalf(c.x);
-					*out++ = ToHalf(c.y);
-					*out++ = ToHalf(c.z);
-					*out++ = ToHalf(p.valid ? 1.f : 0.f);
-				}
-	screen->InitIrradianceVolume(b.sizeX, b.sizeY, b.sizeZ * 6, data);
+	data.Resize(unsigned(size_t(width) * height * layers * 4));
+	memset(data.Data(), 0, data.Size() * sizeof(uint16_t));
+	auto write = [&](int x, int y, int layer, const Vec3 &c, bool valid) {
+		uint16_t *out = data.Data() + ((size_t(layer) * height + y) * width + x) * 4;
+		out[0] = ToHalf(c.x); out[1] = ToHalf(c.y); out[2] = ToHalf(c.z); out[3] = ToHalf(valid ? 1.f : 0.f);
+	};
+	// Diffuse ambient cubes retain their original face * sizeZ + z layout.
+	// The shader divides XY coordinates by textureSize, not the probe count,
+	// because tiny diffuse grids are padded to fit the reflection atlas.
+	for (int f = 0; f < 6; f++) for (int z = 0; z < b.sizeZ; z++)
+		for (int y = 0; y < b.sizeY; y++) for (int x = 0; x < b.sizeX; x++)
+		{
+			const Probe &p = b.probes[b.ProbeIndex(x, y, z)];
+			write(x, y, f * b.sizeZ + z, p.valid ? p.face[f] : Vec3(), p.valid);
+		}
+	for (int i = 0; i < int(b.reflectionProbes.size()); i++)
+	{
+		const ReflectionProbe &probe = b.reflectionProbes[i];
+		if (!probe.valid) continue;
+		int tile = i % (tilesX * tilesY), layer = baseLayer + i / (tilesX * tilesY);
+		int ox = (tile % tilesX) * ReflectionTile, oy = (tile / tilesX) * ReflectionTile;
+		for (int level = 0; level < ReflectionLevels; level++)
+			for (int y = -1; y <= ReflectionResolution; y++) for (int x = -1; x <= ReflectionResolution; x++)
+			{
+				// Fold octahedral guard texels across the seam, rather than
+				// clamping: bilinear filtering must preserve direction at edges.
+				int sx = x, sy = y;
+				if (sx < 0 || sx >= ReflectionResolution) { sx = std::clamp(sx, 0, ReflectionResolution - 1); sy = ReflectionResolution - 1 - sy; }
+				if (sy < 0 || sy >= ReflectionResolution) { sy = std::clamp(sy, 0, ReflectionResolution - 1); sx = ReflectionResolution - 1 - sx; }
+				Vec3 c = probe.pixels[level * ReflectionResolution * ReflectionResolution + sy * ReflectionResolution + sx];
+				write(ox + (level % 2) * ReflectionBordered + x + 1, oy + (level / 2) * ReflectionBordered + y + 1, layer, c, true);
+			}
+	}
+	screen->InitIrradianceVolume(width, height, layers, data);
 	volumeOrigin = { b.origin.x, b.origin.y, b.origin.z, b.spacing };
 	volumeSize = { (float)b.sizeX, (float)b.sizeY, (float)b.sizeZ, 1.f };
+	reflectionOrigin = { b.reflectionOrigin.x, b.reflectionOrigin.y, b.reflectionOrigin.z, b.reflectionSpacing };
+	reflectionSize = { float(b.reflectionX), float(b.reflectionY), float(b.reflectionZ), float(baseLayer) };
+	reflectionAtlas = { float(tilesX), float(tilesY), float(ReflectionResolution), hasReflections ? 1.f : 0.f };
 	volumeUploaded = true;
-	DPrintf(DMSG_NOTIFY, "GI: baked in %.2f s\n", (I_msTime() - b.startTime) / 1000.0);
+	unsigned validReflections = 0;
+	for (const auto &probe : b.reflectionProbes) if (probe.valid) validReflections++;
+	DPrintf(DMSG_NOTIFY, "GI: baked in %.2f s, %u/%u reflection probes, %.2f MiB combined atlas\n", (I_msTime() - b.startTime) / 1000.0,
+		validReflections, unsigned(b.reflectionProbes.size()), data.Size() * sizeof(uint16_t) / (1024.0 * 1024.0));
 }
 
 } // namespace
@@ -906,11 +1327,18 @@ void GI_LevelUnloaded()
 	}
 	volumeUploaded = false;
 	volumeSize = { 0, 0, 0, 0 };
+	reflectionAtlas = { 0, 0, 0, 0 };
 }
 
 void GI_Update(FLevelLocals *level)
 {
-	if (!r_gi || !level) return;
+	// Metal uses the Vulkan resource model. Other backends currently have no
+	// irradiance-array upload implementation, so retain their ambient fallback.
+	if (!screen || !screen->IsVulkan()) return;
+	if ((!r_gi && !(r_sprite_pbr && r_sprite_reflections)) || !level) return;
+	// Enabling reflections after a diffuse-only bake needs a new snapshot.
+	if (volumeUploaded && r_sprite_pbr && r_sprite_reflections && reflectionAtlas.W == 0.f)
+		GI_LevelLoaded(level);
 	// Lights attach to their actors on the first tics, so wait briefly before capturing.
 	if (bakeRequested && !job && level->maptime >= 2)
 	{
@@ -926,13 +1354,12 @@ void GI_Update(FLevelLocals *level)
 
 void GI_SetUniforms(HWViewpointUniforms &uniforms)
 {
-	if (!volumeUploaded || !r_gi)
-	{
-		uniforms.mGISize = { 0, 0, 0, 0 };
-		return;
-	}
+	const bool available = volumeUploaded && screen && screen->IsVulkan();
+	uniforms.mReflectionOrigin = reflectionOrigin;
+	uniforms.mReflectionSize = reflectionSize;
+	uniforms.mReflectionAtlas = available && r_sprite_pbr && r_sprite_reflections ? reflectionAtlas : FVector4(0, 0, 0, 0);
 	uniforms.mGIOrigin = volumeOrigin;
-	uniforms.mGISize = volumeSize;
+	uniforms.mGISize = available && r_gi ? volumeSize : FVector4(0, 0, 0, 0);
 	uniforms.mGIStrength = r_gi_strength;
 	uniforms.mGISaturation = r_gi_saturation;
 }
@@ -949,4 +1376,9 @@ FVector3 GI_TextureAlbedo(FTextureID id)
 {
 	Vec3 albedo = TextureAlbedo(id);
 	return { albedo.x, albedo.y, albedo.z };
+}
+
+std::vector<bool> GI_PlayableSectors(FLevelLocals *level)
+{
+	return PlayableSectors(level);
 }

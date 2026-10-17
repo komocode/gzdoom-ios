@@ -13,6 +13,8 @@ enum ERenderFeature
 	RF_REFLECTIONS = 16,      // write reflectivity to the G-buffer for SSR
 	RF_PARALLAX = 32,         // parallax occlusion from the diffuse height estimate
 	RF_HDR_EMISSIVE = 64,     // brightmaps, fullbright texels and additive lights may exceed 1.0
+	RF_SPRITE_PBR = 128,      // authored sprite normals and material lighting
+	RF_SPRITE_REFLECTIONS = 256, // baked local environment radiance on sprites
 };
 
 // Quality presets. Higher presets enable more features; each feature also has its
@@ -40,6 +42,11 @@ EXTERN_CVAR(Bool, r_autonormal)
 EXTERN_CVAR(Float, r_autonormal_strength)
 EXTERN_CVAR(Bool, r_specular)
 EXTERN_CVAR(Float, r_specular_strength)
+EXTERN_CVAR(Bool, r_sprite_pbr)
+EXTERN_CVAR(Bool, r_sprite_reflections)
+EXTERN_CVAR(Float, r_sprite_light_strength)
+EXTERN_CVAR(Float, r_sprite_normal_strength)
+EXTERN_CVAR(Int, r_sprite_debug)
 EXTERN_CVAR(Bool, r_parallax)
 EXTERN_CVAR(Int, r_ssr)
 EXTERN_CVAR(Float, r_ssr_strength)
@@ -92,3 +99,15 @@ void R_ApplyRenderPreset(int preset);
 // Lets platform code pick a preset for the device. It is applied while
 // r_preset_auto is set; choosing r_preset by hand turns r_preset_auto off.
 void R_SetAutoPreset(int preset);
+
+// Per-map overrides from MAPINFO (forcebloom, ssrstretch; forceheightfog is read
+// by the volumetric pass). The game sets them for the level being drawn; they
+// never write the user's CVARs. r_map_atmosphere 0 ignores them.
+EXTERN_CVAR(Bool, r_map_atmosphere)
+void R_SetMapAtmosphere(bool forceBloom, float ssrStretch);
+// Apple auto quality: whether the device policy allows bloom (not on the
+// lowest tiers, in low power mode or when hot). While r_preset_auto is on and
+// it does not, forcebloom is ignored too.
+void R_SetDeviceBloom(bool allowed);
+bool R_BloomEnabled();		// gl_bloom or the map's forcebloom
+float R_SSRStretch();		// r_ssr_stretch, or the map's ssrstretch while above 0

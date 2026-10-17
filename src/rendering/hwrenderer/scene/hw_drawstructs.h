@@ -363,6 +363,8 @@ public:
 	uint8_t hw_styleflags;
 	bool fullbright;
 	bool polyoffset;
+	bool spritePBR = false;
+	FVector3 spriteNormal = { 0, 0, 0 };
 	PalEntry ThingColor;	// thing's own color
 	FColormap Colormap;
 	FSpriteModelFrame * modelframe;
@@ -447,7 +449,7 @@ inline float Dist2(float x1,float y1,float x2,float y2)
 }
 
 bool hw_SetPlaneTextureRotation(const HWSectorPlane * secplane, FGameTexture * gltexture, VSMatrix &mat);
-void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata);
+void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata, const FVector4 *spriteBounds = nullptr);
 LightProbe* FindLightProbe(FLevelLocals* level, float x, float y, float z);
 
 extern const float LARGE_VALUE;

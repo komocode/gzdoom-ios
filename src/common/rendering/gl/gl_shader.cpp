@@ -346,6 +346,16 @@ bool FShader::Load(const char * name, const char * vert_prog_lump, const char * 
 			vec4 uWeatherMap;
 			vec4 uWeatherParams;
 			vec4 uSceneDepthMap;
+			vec4 uReflectionOrigin;
+			vec4 uReflectionSize;
+			vec4 uReflectionAtlas;
+			vec4 uSunDir;
+			vec4 uSunColor;
+			vec4 uSunShadowU;
+			vec4 uSunShadowV;
+			vec4 uSunShadowD;
+			vec4 uSunParams;
+			vec4 uSunParams2;
 		};
 
 		uniform int uTextureMode;

@@ -28,6 +28,7 @@
 #include "texturemanager.h"
 #include "c_cvars.h"
 #include "v_video.h"
+#include "sprite_materials.h"
 
 
 CVAR(Bool, gl_customshader, true, 0);
@@ -47,8 +48,39 @@ void FMaterial::SetLayerCallback(IHardwareTexture* (*cb)(int layer, int translat
 //
 //===========================================================================
 
+bool FMaterial::SupportsSpritePBR(FGameTexture* tx)
+{
+	if (!tx || tx->isHardwareCanvas() || tx->isWarped() || tx->GetShaderIndex() >= FIRST_USER_SHADER) return false;
+	if (!tx->GetTexture() || tx->GetTexture()->GetWidth() <= 0 || tx->GetTexture()->GetHeight() <= 0 || !tx->Layers) return false;
+	for (auto map : { tx->Layers->Normal.get(), tx->Layers->Specular.get(), tx->Layers->Metallic.get(), tx->Layers->Roughness.get(), tx->Layers->AmbientOcclusion.get() })
+		if (map && map->GetWidth() > 0 && map->GetHeight() > 0) return true;
+	return false;
+}
+
 FMaterial::FMaterial(FGameTexture * tx, int scaleflags)
 {
+	mSpritePBR = !!(scaleflags & CTF_SpritePBR) && !(scaleflags & CTF_Indexed) && SupportsSpritePBR(tx);
+	scaleflags &= ~CTF_SpritePBR;
+	if (mSpritePBR && !tx->SpriteLayers)
+	{
+		// Material construction follows the renderer's existing single-threaded
+		// cache lifetime. Publish complete immutable layers once; variants share
+		// these maps and preserve explicit GLDEFS/automatic material assignments.
+		auto layers = std::make_unique<FMaterialLayers>();
+		int width = tx->GetTexture()->GetWidth(), height = tx->GetTexture()->GetHeight();
+		layers->Normal = CreateSpriteMaterialLayer(tx->Layers->Normal.get(), width, height, ESpriteMaterialChannel::Normal);
+		if (tx->Layers->Specular.get() && tx->Layers->Specular->GetWidth() > 0 && tx->Layers->Specular->GetHeight() > 0)
+			layers->Specular = CreateSpriteMaterialLayer(tx->Layers->Specular.get(), width, height, ESpriteMaterialChannel::Specular);
+		else
+		{
+			layers->Metallic = CreateSpriteMaterialLayer(tx->Layers->Metallic.get(), width, height, ESpriteMaterialChannel::Metallic);
+			layers->Roughness = CreateSpriteMaterialLayer(tx->Layers->Roughness.get(), width, height, ESpriteMaterialChannel::Roughness);
+			layers->AmbientOcclusion = CreateSpriteMaterialLayer(tx->Layers->AmbientOcclusion.get(), width, height, ESpriteMaterialChannel::AmbientOcclusion);
+		}
+		tx->SpriteLayers = std::move(layers);
+	}
+	auto materialLayers = mSpritePBR ? tx->SpriteLayers.get() : tx->Layers.get();
+	int materialScaleFlags = mSpritePBR ? (scaleflags & CTF_Expand) : 0;
 	mShaderIndex = SHADER_Default;
 	sourcetex = tx;
 	auto imgtex = tx->GetTexture();
@@ -79,19 +111,19 @@ FMaterial::FMaterial(FGameTexture * tx, int scaleflags)
 			mShaderIndex = tx->isWarped(); // This picks SHADER_Warp1 or SHADER_Warp2
 		}
 		// Note that the material takes no ownership of the texture!
-		else if (tx->Layers && tx->Layers->Normal.get() && tx->Layers->Specular.get())
+		else if (materialLayers && materialLayers->Normal.get() && materialLayers->Specular.get())
 		{
-			for (auto &texture : { tx->Layers->Normal.get(), tx->Layers->Specular.get() })
+			for (auto &texture : { materialLayers->Normal.get(), materialLayers->Specular.get() })
 			{
-				mTextureLayers.Push({ texture, 0, -1 });
+				mTextureLayers.Push({ texture, materialScaleFlags, -1 });
 			}
 			mShaderIndex = SHADER_Specular;
 		}
-		else if (tx->Layers && tx->Layers->Normal.get() && tx->Layers->Metallic.get() && tx->Layers->Roughness.get() && tx->Layers->AmbientOcclusion.get())
+		else if (materialLayers && materialLayers->Normal.get() && materialLayers->Metallic.get() && materialLayers->Roughness.get() && materialLayers->AmbientOcclusion.get())
 		{
-			for (auto &texture : { tx->Layers->Normal.get(), tx->Layers->Metallic.get(), tx->Layers->Roughness.get(), tx->Layers->AmbientOcclusion.get() })
+			for (auto &texture : { materialLayers->Normal.get(), materialLayers->Metallic.get(), materialLayers->Roughness.get(), materialLayers->AmbientOcclusion.get() })
 			{
-				mTextureLayers.Push({ texture, 0, -1 });
+				mTextureLayers.Push({ texture, materialScaleFlags, -1 });
 			}
 			mShaderIndex = SHADER_PBR;
 		}
@@ -151,7 +183,8 @@ FMaterial::FMaterial(FGameTexture * tx, int scaleflags)
 	mScaleFlags = scaleflags;
 
 	mTextureLayers.ShrinkToFit();
-	tx->Material[scaleflags] = this;
+	if (mSpritePBR) tx->SpriteMaterial[scaleflags] = this;
+	else tx->Material[scaleflags] = this;
 	if (tx->isHardwareCanvas()) tx->SetTranslucent(false);
 }
 
@@ -205,13 +238,15 @@ FMaterial * FMaterial::ValidateTexture(FGameTexture * gtex, int scaleflags, bool
 {
 	if (gtex && gtex->isValid())
 	{
+		bool spritePBR = (scaleflags & CTF_SpritePBR) && !(scaleflags & CTF_Indexed) && SupportsSpritePBR(gtex);
+		scaleflags &= ~CTF_SpritePBR;
 		if (scaleflags & CTF_Indexed) scaleflags = CTF_Indexed;
 		if (!gtex->expandSprites()) scaleflags &= ~CTF_Expand;
 
-		FMaterial *hwtex = gtex->Material[scaleflags];
+		FMaterial *hwtex = spritePBR ? gtex->SpriteMaterial[scaleflags] : gtex->Material[scaleflags];
 		if (hwtex == NULL && create)
 		{
-			hwtex = screen->CreateMaterial(gtex, scaleflags);
+			hwtex = screen->CreateMaterial(gtex, scaleflags | (spritePBR ? CTF_SpritePBR : 0));
 		}
 		return hwtex;
 	}

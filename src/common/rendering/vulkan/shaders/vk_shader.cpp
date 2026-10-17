@@ -69,6 +69,7 @@ bool VkShaderManager::CompileNextShader()
 		VkShaderProgram prog;
 		prog.vert = LoadVertShader(defaultshaders[i].ShaderName, mainvp, defaultshaders[i].Defines);
 		prog.frag = LoadFragShader(defaultshaders[i].ShaderName, mainfp, defaultshaders[i].gettexelfunc, defaultshaders[i].lightfunc, defaultshaders[i].Defines, true, compilePass == GBUFFER_PASS);
+		prog.source = SceneFragmentSource::ForSun(defaultshaders[i].ShaderName, mainfp, defaultshaders[i].gettexelfunc, defaultshaders[i].lightfunc, defaultshaders[i].Defines, true, compilePass == GBUFFER_PASS);
 		mMaterialShaders[compilePass].push_back(std::move(prog));
 		
 		compileIndex++;
@@ -85,6 +86,7 @@ bool VkShaderManager::CompileNextShader()
 		VkShaderProgram natprog;
 		natprog.vert = LoadVertShader(defaultshaders[i].ShaderName, mainvp, defaultshaders[i].Defines);
 		natprog.frag = LoadFragShader(defaultshaders[i].ShaderName, mainfp, defaultshaders[i].gettexelfunc, defaultshaders[i].lightfunc, defaultshaders[i].Defines, false, compilePass == GBUFFER_PASS);
+		natprog.source = SceneFragmentSource::ForSun(defaultshaders[i].ShaderName, mainfp, defaultshaders[i].gettexelfunc, defaultshaders[i].lightfunc, defaultshaders[i].Defines, false, compilePass == GBUFFER_PASS);
 		mMaterialShadersNAT[compilePass].push_back(std::move(natprog));
 
 		compileIndex++;
@@ -105,6 +107,7 @@ bool VkShaderManager::CompileNextShader()
 		VkShaderProgram prog;
 		prog.vert = LoadVertShader(name, mainvp, defines.GetChars());
 		prog.frag = LoadFragShader(name, mainfp, usershaders[i].shader.GetChars(), defaultshaders[usershaders[i].shaderType].lightfunc, defines.GetChars(), true, compilePass == GBUFFER_PASS);
+		prog.source = SceneFragmentSource::ForSun(name.GetChars(), mainfp, usershaders[i].shader.GetChars(), defaultshaders[usershaders[i].shaderType].lightfunc, defines.GetChars(), true, compilePass == GBUFFER_PASS);
 		mMaterialShaders[compilePass].push_back(std::move(prog));
 
 		compileIndex++;
@@ -121,6 +124,7 @@ bool VkShaderManager::CompileNextShader()
 		VkShaderProgram prog;
 		prog.vert = LoadVertShader(effectshaders[i].ShaderName, effectshaders[i].vp, effectshaders[i].defines);
 		prog.frag = LoadFragShader(effectshaders[i].ShaderName, effectshaders[i].fp1, effectshaders[i].fp2, effectshaders[i].fp3, effectshaders[i].defines, true, compilePass == GBUFFER_PASS);
+		prog.source = SceneFragmentSource::ForSun(effectshaders[i].ShaderName, effectshaders[i].fp1, effectshaders[i].fp2, effectshaders[i].fp3, effectshaders[i].defines, true, compilePass == GBUFFER_PASS);
 		mEffectShaders[compilePass].push_back(std::move(prog));
 
 		compileIndex++;
@@ -137,6 +141,39 @@ bool VkShaderManager::CompileNextShader()
 		}
 	}
 	return false;
+}
+
+VulkanShader *VkShaderManager::GetSunFragment(VkShaderProgram *program)
+{
+	if (!program->source)
+		return program->frag.get();
+	if (!program->fragSun)
+	{
+		const SceneFragmentSource &src = *program->source;
+		program->fragSun = LoadFragShader(src.Name, src.FragLump.GetChars(), src.Material(), src.Light(), src.SunDefines().GetChars(), src.AlphaTest, src.GBufferPass);
+	}
+	return program->fragSun.get();
+}
+
+void VkShaderManager::PrecacheSunShaders(EPassType passType, const TArray<int> &userShaders)
+{
+	if (compileIndex != -1)
+		return;
+	// Textured (also with material maps) with and without alpha test, the warped
+	// liquids and untextured draws.
+	for (unsigned int eff = 0; eff <= SHADER_NoTexture; eff++)
+	{
+		for (bool alphatest : { false, true })
+		{
+			if (auto program = Get(eff, alphatest, passType))
+				GetSunFragment(program);
+		}
+	}
+	for (int index : userShaders)
+	{
+		if (auto program = Get(index, true, passType))
+			GetSunFragment(program);
+	}
 }
 
 VkShaderManager::VkShaderManager(VulkanRenderDevice* fb) : fb(fb)
@@ -188,6 +225,7 @@ static const char *shaderBindings = R"(
 	// Read with texelFetch only, so they need no sampler (Metal has few sampler slots).
 	layout(set = 0, binding = 4) uniform texture2DArray WeatherMap;
 	layout(set = 0, binding = 5) uniform texture2D SceneLinearDepth;
+	layout(set = 0, binding = 6) uniform texture2D SunShadowMap;
 	#ifdef SUPPORTS_RAYTRACING
 	layout(set = 0, binding = 2) uniform accelerationStructureEXT TopLevelAS;
 	#endif
@@ -225,6 +263,16 @@ static const char *shaderBindings = R"(
 		vec4 uWeatherMap;
 		vec4 uWeatherParams;
 		vec4 uSceneDepthMap;
+		vec4 uReflectionOrigin;
+		vec4 uReflectionSize;
+		vec4 uReflectionAtlas;
+		vec4 uSunDir;
+		vec4 uSunColor;
+		vec4 uSunShadowU;
+		vec4 uSunShadowV;
+		vec4 uSunShadowD;
+		vec4 uSunParams;
+		vec4 uSunParams2;
 	};
 
 	layout(set = 1, binding = 1, std140) uniform readonly MatricesUBO {

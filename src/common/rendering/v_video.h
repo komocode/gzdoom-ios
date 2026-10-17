@@ -244,6 +244,13 @@ public:
 	virtual void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t>& rgbaHalfData) {}
 	// Sky exposure map for weather (RGBA16F, one array layer). Returns false when the backend can't bind it.
 	virtual bool InitWeatherMap(int width, int height, TArray<uint16_t>& rgbaHalfData) { return false; }
+	// Sun shadow map (hw_sun.h): R32F depth, read with texelFetch. A null depth or a zero
+	// size binds a 1x1 placeholder. Returns false when the backend can't bind it.
+	virtual bool InitSunShadowMap(int width, int height, const float *depth) { return false; }
+	// Compiles the sun variants of the common scene shaders and of these user shaders
+	// (material shader indices) ahead of the first sunlit frame (hw_sun.h); the
+	// others are compiled when first drawn.
+	virtual void PrecacheSunShaders(const TArray<int> &userShaders) {}
 	// True when the scene shaders can read the half-resolution linear depth from
 	// AmbientOccludeScene during the rest of the main view (soft particles).
 	virtual bool SceneDepthReadable() { return false; }

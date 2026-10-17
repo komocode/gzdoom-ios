@@ -228,7 +228,10 @@ extern "C" int SDL_main(int argc, char **argv)
             if (!strcmp(argv[i], "-iwad")) suppliedIWAD = YES;
         }
         GZGameLibrary *library = [GZGameLibrary new];
-        if (!suppliedIWAD)
+        NSString *standalone = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"standalone.ipk3"];
+        if (!suppliedIWAD && [[NSFileManager defaultManager] fileExistsAtPath:standalone])
+            selectedGame = standalone;
+        if (!suppliedIWAD && !selectedGame)
         {
             libraryWindow = [[UIWindow alloc] initWithWindowScene:gameScene];
             libraryWindow.rootViewController = [[UINavigationController alloc] initWithRootViewController:library];

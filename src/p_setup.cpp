@@ -27,6 +27,7 @@
 
 #include "hw_irradiance.h"
 #include "hw_weather.h"
+#include "hw_sun.h"
 #include <math.h>
 #ifdef _MSC_VER
 #include <malloc.h>		// for alloca()
@@ -389,6 +390,7 @@ void FLevelLocals::ClearLevelData(bool fullgc)
 	{
 		GI_LevelUnloaded();
 		Weather_LevelUnloaded();
+		Sun_LevelUnloaded();
 	}
 	aabbTree = nullptr;
 	levelMesh = nullptr;

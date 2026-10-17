@@ -117,7 +117,8 @@ public:
 
 	// Background pipeline compilation (see mtl_renderstate.mm)
 	struct PrewarmFormats { int flat = -1, sky = -1, particles = -1; };
-	void QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples);
+	// sun queues the programs' sun variants (hw_sun.h) that are compiled already.
+	void QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples, bool sun = false);
 	void PumpPrewarm(int maxPending);
 	void FinishPrewarm();
 

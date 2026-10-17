@@ -258,7 +258,7 @@ id<MTLRenderPipelineState> MtlRenderState::GetPipeline(const MtlPipelineKey &key
 // hundreds of milliseconds, so the first wall, sky, sprite or particle drawn
 // with a new combination would stall its frame. The common scene combinations
 // are queued here and compiled on Metal's compiler threads instead.
-void MtlRenderState::QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples)
+void MtlRenderState::QueueScenePipelines(MtlShaderManager *shaders, const PrewarmFormats &formats, int samples, bool sun)
 {
 	FRenderStyle opaque;
 	opaque.BlendOp = STYLEOP_Add;
@@ -273,6 +273,13 @@ void MtlRenderState::QueueScenePipelines(MtlShaderManager *shaders, const Prewar
 	{
 		if (!program || !program->vert || format < 0)
 			return;
+		if (sun)
+		{
+			// Only the sun variants compiled already (MtlShaderManager::PrecacheSunVariants).
+			program = program->source ? program->sun.get() : nullptr;
+			if (!program)
+				return;
+		}
 		MtlPipelineKey key;
 		memset(&key, 0, sizeof(key));
 		key.Program = program;
@@ -647,6 +654,9 @@ void MtlRenderState::ApplyPipeline()
 	}
 	if (!program || !program->vert)
 		program = shaders->Get(0, true, passType);
+	// Sunlit viewpoints draw with the sun variants (hw_sun.h).
+	if (mSunShading)
+		program = shaders->GetSunVariant(program);
 
 	MtlPipelineKey key;
 	memset(&key, 0, sizeof(key));
@@ -904,6 +914,7 @@ void MtlRenderState::ApplyMaterial()
 	boundSamplers[MTLTEX_IRRADIANCE] = samplers->LightmapSampler;
 	bound[MTLTEX_WEATHER] = textures->WeatherMap.Texture;
 	bound[MTLTEX_SCENEDEPTH] = textures->SceneDepth ? textures->SceneDepth : textures->NullTexture;
+	bound[MTLTEX_SUNSHADOW] = textures->SunShadow.Texture;
 
 	[mEncoder setFragmentTextures:bound withRange:NSMakeRange(0, MTLTEX_SCENE_COUNT)];
 	[mEncoder setFragmentSamplerStates:boundSamplers withRange:NSMakeRange(0, MTLTEX_IRRADIANCE + 1)];

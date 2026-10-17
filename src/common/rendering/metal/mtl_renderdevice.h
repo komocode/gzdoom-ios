@@ -97,6 +97,8 @@ public:
 	void InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t> &LMTextureData) override;
 	void InitIrradianceVolume(int width, int height, int layers, TArray<uint16_t> &rgbaHalfData) override;
 	bool InitWeatherMap(int width, int height, TArray<uint16_t> &rgbaHalfData) override;
+	bool InitSunShadowMap(int width, int height, const float *depth) override;
+	void PrecacheSunShaders(const TArray<int> &userShaders) override;
 	bool SceneDepthReadable() override { return true; }
 	void BlurScene(float amount) override;
 	void PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D) override;
@@ -169,6 +171,7 @@ private:
 	bool mPrimaryShadersDone = false, mShadersReady = false;
 	bool mUpscalerFailed = false;
 	int mPrewarmSignature[4] = { -1, -1, -1, -1 };
+	bool mSunPrewarm = false;	// a sunlit level was loaded: prewarm the sun variants too
 
 	std::shared_ptr<MtlFrameSync> mSync = std::make_shared<MtlFrameSync>();
 	uint64_t mFrameSerial = 1;

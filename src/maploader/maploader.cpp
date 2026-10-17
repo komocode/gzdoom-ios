@@ -61,6 +61,7 @@
 
 #include "hw_irradiance.h"
 #include "hw_weather.h"
+#include "hw_sun.h"
 #include <math.h>
 #include <cmath>	// needed for std::floor on mac
 #include "maploader.h"
@@ -3278,6 +3279,7 @@ void MapLoader::LoadLevel(MapData *map, const char *lumpname, int position)
 	// The level mesh is built on first use, after savegame or hub state has been restored.
 	GI_LevelLoaded(Level);
 	Weather_LevelLoaded(Level);
+	Sun_LevelLoaded(Level);
 
 	// [DVR] Populate subsector->bbox for alternative space culling in orthographic projection with no fog of war
 	subsector_t* sub = &Level->subsectors[0];

@@ -690,6 +690,15 @@ struct LevelLocals native
 	native void SetWeather(int type, double density = 1, double windSpeed = 0, double windAngle = 0, Color tint = 0, double dropLength = 1, double fallSpeed = 1);
 	native clearscope int GetWeather();
 	native void WeatherFlash(double strength = 1, double duration = 0.4);
+	// Directional sun (MAPINFO sun). SetSunColor takes effect at once; SetSun
+	// changes the direction (yaw 0 east, 90 north; elevation above the horizon)
+	// and re-bakes the shadow map in the background, keeping the old shadows
+	// until it is done. Either turns the sun on for a map without a sun key.
+	// Savegames keep the settings.
+	native void SetSunColor(Color c, double intensity);
+	native void SetSun(double yaw, double elevation);
+	native clearscope Color GetSunColor();
+	native clearscope double GetSunIntensity();
 	native VisualThinker SpawnVisualThinker(Class<VisualThinker> type, bool clientSide = false);
 
 	clearscope native static bool WorldPaused(bool checkLag = true);

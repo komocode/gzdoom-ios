@@ -32,6 +32,7 @@
 #include "hw_irradiance.h"
 #include "doom_levelmesh.h"
 #include "hw_weather.h"
+#include "hw_sun.h"
 #include "gi.h"
 #include "a_dynlight.h"
 #include "m_png.h"
@@ -143,6 +144,7 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
 	{
 		GI_Update(camera->Level);
 		Weather_Update(camera->Level);
+		Sun_Update(camera->Level);
 	}
 
 	// Update the attenuation flag of all light defaults for each viewpoint.
@@ -367,6 +369,7 @@ sector_t* RenderView(player_t* player)
 	}
 	hw_postprocess.SetTonemapMode(level.info ? level.info->tonemap : ETonemapMode::None);
 	if (level.info) hw_postprocess.grading.SetLevel(level.MapName, level.info->gradinglut, level.info->exposurebias);
+	R_SetMapAtmosphere(level.atmosphere.ForceBloom, level.atmosphere.SSRStretch);
 
 	sector_t* retsec;
 	if (!V_IsHardwareRenderer())

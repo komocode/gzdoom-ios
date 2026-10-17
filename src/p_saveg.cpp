@@ -72,6 +72,29 @@ EXTERN_CVAR(Bool, save_formatted)
 //
 //==========================================================================
 
+FSerializer &Serialize(FSerializer &arc, const char *key, FSunSettings &sun, FSunSettings *def)
+{
+	if (arc.BeginObject(key))
+	{
+		arc("enabled", sun.Enabled)
+			("yaw", sun.Yaw)
+			("elevation", sun.Elevation)
+			("color", sun.Color)
+			("intensity", sun.Intensity)
+			("softness", sun.Softness)
+			("bounce", sun.Bounce)
+			("specular", sun.Specular);
+		arc.EndObject();
+	}
+	return arc;
+}
+
+//==========================================================================
+//
+//
+//
+//==========================================================================
+
 FSerializer &Serialize(FSerializer &arc, const char *key, FWeatherSettings &weather, FWeatherSettings *def)
 {
 	if (arc.BeginObject(key))
@@ -1012,6 +1035,7 @@ void FLevelLocals::Serialize(FSerializer &arc, bool hubload)
 		("heightfogcolor", heightfogcolor)
 		("heightfogwind", heightfogwind)
 		("weather", weather)
+		("sun", sun)
 		("deathsequence", deathsequence)
 		("bodyqueslot", bodyqueslot)
 		("spawnindex", spawnindex)

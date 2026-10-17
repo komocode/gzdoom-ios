@@ -54,6 +54,7 @@ void HWSkyPortal::DrawContents(HWDrawInfo *di, FRenderState &state)
 	state.EnableFog(false);
 	state.AlphaFunc(Alpha_GEqual, 0.f);
 	state.SetRenderStyle(STYLE_Translucent);
+	state.SetNoSun(true);
 	bool oldClamp = state.SetDepthClamp(true);
 
 	di->SetupView(state, 0, 0, 0, !!(mState->MirrorFlag & 1), !!(mState->PlaneMirrorFlag & 1));
@@ -103,6 +104,7 @@ void HWSkyPortal::DrawContents(HWDrawInfo *di, FRenderState &state)
 	}
 	di->lightmode = oldlightmode;
 	state.SetDepthClamp(oldClamp);
+	state.SetNoSun(false);
 }
 
 const char *HWSkyPortal::GetName() { return "Sky"; }

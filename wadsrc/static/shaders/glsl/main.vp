@@ -7,6 +7,13 @@ layout(location = 0) out vec4 vTexCoord;
 layout(location = 1) out vec4 vColor;
 layout(location = 9) out vec3 vLightmap;
 
+// Analytic particle ellipsoids: rows map eye-space points to unit support.
+// Declared in SIMPLE variants too, so the stage interfaces always agree.
+layout(location = 10) flat out vec4 vVolumeRow0;
+layout(location = 11) flat out vec4 vVolumeRow1;
+layout(location = 12) flat out vec4 vVolumeRow2;
+layout(location = 13) flat out vec4 vVolumeParams;
+
 #ifndef SIMPLE	// we do not need these for simple shaders
 layout(location = 3) in vec4 aVertex2;
 layout(location = 4) in vec4 aNormal;
@@ -139,6 +146,108 @@ void ParticleOutput(vec4 eye)
 	#endif
 }
 
+void VolumeParticleVertex(vec2 corner, float shape, float age, float life, float flags)
+{
+	// The shared depth producer reconstructs perspective depth. Orthographic
+	// cameras retain the original stone recipe; also retire any older volumes
+	// still alive when the user switches camera projection.
+	if (abs(ProjectionMatrix[3][3]) > abs(ProjectionMatrix[2][3]))
+	{
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		return;
+	}
+	bool powder = shape > 12.5;
+	float extension = 0.8 * (1.0 - exp(-22.0 * age)) + 0.2 * (1.0 - exp(-4.0 * age));
+	float growth = powder ? 1.0 + 2.3 * (1.0 - exp(-18.0 * age))
+		: 0.3 + 0.7 * (0.8 * (1.0 - exp(-28.0 * age)) + 0.2 * (1.0 - exp(-5.0 * age)));
+	vec3 pos;
+	if (powder)
+	{
+		float k = max(aVertex2.w, 0.01);
+		vec3 terminal = vec3(0.0, aNormal.w / k, 0.0);
+		pos = aPosition.xyz + terminal * age + (aNormal.xyz - terminal) * ((1.0 - exp(-k * age)) / k);
+	}
+	else pos = aPosition.xyz + aNormal.xyz * extension;
+	vec3 radii = max(aBoneWeight.xyz * vec3(growth, growth, powder ? growth : 0.12 + 0.88 * extension), vec3(0.001));
+	float density;
+	if (powder)
+		density = pow(max(1.0 - age / life, 0.0), 1.6) * min(1.0, age * 70.0) / (growth * growth * growth);
+	else
+	{
+		float fade = clamp((age - 0.15) / max(life - 0.15, 0.001), 0.0, 1.0);
+		float dilution = 1.0 + age * 0.16;
+		density = exp(-age * 1.25) * min(1.0, age * 16.0) * (1.0 - fade) * (1.0 - fade) * (1.0 + 2.0 * fade)
+			/ (dilution * dilution * dilution);
+	}
+
+	float normalLength = length(aNormal2.xyz);
+	vec3 axis2 = normalLength > 0.00001 ? aNormal2.xyz / normalLength : vec3(0.0, 1.0, 0.0);
+	// Match the CPU frame after its world (x,y,z) -> shader (x,z,y) swap.
+	vec3 axis0 = normalize(abs(axis2.y) < 0.9 ? vec3(-axis2.z, 0.0, axis2.x) : vec3(0.0, axis2.z, -axis2.y));
+	vec3 axis1 = -cross(axis2, axis0);
+	vec3 centerEye = (ViewMatrix * vec4(pos, 1.0)).xyz;
+	mat4 eyeToWorld = inverse(ViewMatrix);
+	mat3 inverseTranspose = transpose(mat3(eyeToWorld));
+	vec3 row0 = inverseTranspose * axis0 / radii.x;
+	vec3 row1 = inverseTranspose * axis1 / radii.y;
+	vec3 row2 = inverseTranspose * axis2 / radii.z;
+	vVolumeRow0 = vec4(row0, -dot(row0, centerEye));
+	vVolumeRow1 = vec4(row1, -dot(row1, centerEye));
+	vVolumeRow2 = vec4(row2, -dot(row2, centerEye));
+	vec3 cameraWorld = eyeToWorld[3].xyz / eyeToWorld[3].w;
+	// SetViewMatrix is rotation/reflection times vertical pixelstretch. This
+	// metric converts normalized eye-ray distance back to world map units.
+	float stretchSquared = dot(ViewMatrix[1].xyz, ViewMatrix[1].xyz);
+	vVolumeParams = vec4(max(aLightmap.z, 0.0) * aColor.a * density, cameraWorld.y - aLightmap.y, 0.0, 1.0 - stretchSquared);
+	// Both planes are evaluated along the actual ray in the fragment shader.
+	vWorldNormal = normalLength > 0.00001 ? vec4(inverseTranspose * axis2, dot(axis2, cameraWorld) - aNormal2.w / normalLength)
+		: vec4(0.0, 0.0, 0.0, 1.0);
+	vLightmap = inverseTranspose * vec3(0.0, 1.0, 0.0);
+	vec3 rgb = aColor.rgb * abs(aLightmap.x);
+	if (mod(flags, 2.0) < 1.0) rgb = aColor.rgb * ParticleLighting(pos, abs(aLightmap.x), 1.0);
+	vColor = vec4(rgb, 1.0);
+
+	// Project the enclosing eye-space AABB. Unlike a center-plane billboard,
+	// this covers perspective foreshortening and survives camera entry.
+	vec3 ex = mat3(ViewMatrix) * (axis0 * radii.x);
+	vec3 ey = mat3(ViewMatrix) * (axis1 * radii.y);
+	vec3 ez = mat3(ViewMatrix) * (axis2 * radii.z);
+	vec3 extent = sqrt(ex * ex + ey * ey + ez * ez);
+	float depth = -centerEye.z;
+	float nearDepth = max(0.001, abs(ProjectionMatrix[3][2] / (ProjectionMatrix[2][2] - 1.0))) * 1.001;
+	float front = depth - extent.z, back = depth + extent.z;
+	if (back <= 0.0 || vVolumeParams.x <= 0.0)
+	{
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		return;
+	}
+	vec2 ndcMin = vec2(-1.0), ndcMax = vec2(1.0);
+	if (front > nearDepth)
+	{
+		vec2 low = centerEye.xy - extent.xy, high = centerEye.xy + extent.xy;
+		vec2 ratioMin = min(min(low / front, low / back), min(high / front, high / back));
+		vec2 ratioMax = max(max(low / front, low / back), max(high / front, high / back));
+		vec2 scale = vec2(ProjectionMatrix[0][0], ProjectionMatrix[1][1]);
+		vec2 offset = vec2(ProjectionMatrix[2][0], ProjectionMatrix[2][1]);
+		vec2 projectedMin = ratioMin * scale - offset, projectedMax = ratioMax * scale - offset;
+		ndcMin = min(projectedMin, projectedMax);
+		ndcMax = max(projectedMin, projectedMax);
+	}
+	if (any(lessThan(ndcMax, vec2(-1.0))) || any(greaterThan(ndcMin, vec2(1.0))))
+	{
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		return;
+	}
+	ndcMin = max(ndcMin, vec2(-1.0));
+	ndcMax = min(ndcMax, vec2(1.0));
+	vec2 ndc = mix(ndcMin, ndcMax, corner * 0.5 + 0.5);
+	vec4 unprojected = inverse(ProjectionMatrix) * vec4(ndc, 0.0, 1.0);
+	vec3 proxy = unprojected.xyz * (-max(front, nearDepth) / min(unprojected.z, -0.000001));
+	gradientdist = proxy; // interpolation gives the fragment's actual eye ray
+	pixelpos = vec4((eyeToWorld * vec4(proxy, 1.0)).xyz, max(depth, 0.0));
+	ParticleOutput(vec4(proxy, 1.0));
+}
+
 // GPU particles (hw_gpuparticles.cpp). Every attribute is constant for the
 // particle's lifetime and the motion is evaluated in closed form:
 //   aPosition = start position, start time    aNormal   = velocity, gravity
@@ -157,11 +266,17 @@ void ParticleVertex()
 	bool additive = aLightmap.x >= 0.0;
 
 	ParticleDefaults();
-	vTexCoord = vec4(corner, fract(sin(dot(aPosition.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453), shape);
+	// Velocity and start time distinguish every chip in a burst at one point.
+	vTexCoord = vec4(corner, fract(sin(dot(aPosition.xyz + aNormal.xyz * 0.17, vec3(12.9898, 78.233, 37.719)) + aPosition.w * 3.31) * 43758.5453), shape);
 
 	if (age < 0.0 || age >= life || additive != (uMaterialParams.z > 0.5))
 	{
 		gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside the view volume: the quad is clipped away
+		return;
+	}
+	if (shape > 11.5 && shape < 13.5)
+	{
+		VolumeParticleVertex(corner, shape, age, life, flags);
 		return;
 	}
 
@@ -172,9 +287,37 @@ void ParticleVertex()
 	vec3 vel = (aNormal.xyz - terminal) * e + terminal;
 
 	float t = age / life;
-	float size = mix(aVertex2.y, aVertex2.z, t);
+	bool smoke = shape > 0.5 && shape < 1.5 && !additive;
+	// A pressure puff expands quickly, then rolls outward more slowly. Keep
+	// the dense early body instead of fading it away as soon as it is born.
+	float growth = smoke ? 1.0 - (1.0 - t) * (1.0 - t) : t;
+	float size = mix(aVertex2.y, aVertex2.z, growth);
 	float rest = aLightmap.y + size * 0.5;
-	if (pos.y <= rest)
+	float spinAge = age;
+	bool chunk = shape > 1.5 && shape < 2.5;
+	bool bounce = chunk && mod(floor(flags / 2.0), 2.0) > 0.5;
+	float hitTime = floor(flags / 4.0) / 128.0;
+	if (bounce && age >= hitTime)
+	{
+		float hitExp = exp(-k * hitTime);
+		vec3 hitPos = aPosition.xyz + terminal * hitTime + (aNormal.xyz - terminal) * ((1.0 - hitExp) / k);
+		vec3 hitVel = (aNormal.xyz - terminal) * hitExp + terminal;
+		float gravity = max(-aNormal.w, 1.0);
+		float up = min(max(-hitVel.y, 0.0) * 0.32, 105.0);
+		float hop = 2.0 * up / gravity;
+		float after = age - hitTime;
+		float second = max(after - hop, 0.0);
+		float y = after < hop ? up * after - 0.5 * gravity * after * after
+			: up * 0.34 * second - 0.5 * gravity * second * second;
+		float moving = min(after, hop * 1.34);
+		float friction = exp(-8.0 * moving);
+		pos = vec3(hitPos.x, rest + max(y, 0.0), hitPos.z);
+		pos.xz += hitVel.xz * 0.45 * ((1.0 - friction) / 8.0);
+		vel = vec3(hitVel.x * friction * 0.45, after < hop ? up - gravity * after : up * 0.34 - gravity * second, hitVel.z * friction * 0.45);
+		if (after >= hop * 1.34) vel = vec3(0.0);
+		spinAge = hitTime + moving;
+	}
+	else if (pos.y <= rest)
 	{
 		pos.y = rest; // particles settle on the floor below them
 		vel = vec3(vel.x, 0.0, vel.z) * 0.25;
@@ -192,10 +335,12 @@ void ParticleVertex()
 	}
 	else
 	{
-		float a = vTexCoord.z * 6.2831853 + age * (vTexCoord.z - 0.5) * 1.5; // slow random spin
+		float a = vTexCoord.z * 6.2831853 + spinAge * (vTexCoord.z - 0.5) * (chunk ? 24.0 : 1.5);
 		axis = vec2(cos(a), sin(a));
 	}
-	vec2 offset = axis * (corner.x * len) + vec2(-axis.y, axis.x) * (corner.y * size);
+	// Foreshortening as a shard tumbles makes its broken faces read in depth.
+	float tumble = chunk ? 0.35 + 0.65 * abs(cos(spinAge * (5.0 + vTexCoord.z * 8.0) + vTexCoord.z * 30.0)) : 1.0;
+	vec2 offset = axis * (corner.x * len) + vec2(-axis.y, axis.x) * (corner.y * size * tumble);
 	eye.xy += offset;
 
 	// The fragment shader fades the particle where it meets its source surface
@@ -203,10 +348,12 @@ void ParticleVertex()
 	vec3 worldOffset = inverse(mat3(ViewMatrix)) * vec3(offset, 0.0);
 	vWorldNormal = aNormal2;
 	glowdist = vec3(aLightmap.y, max(size * 0.6, 0.5), 0.0);
+	vLightmap.yz = vec2(age, tumble);
 
 	// Fade in over a frame, out over the lifetime (solid chips, casings and
 	// droplets only at the end; motes swell and fade), and away close to the camera.
 	float fadeOut = (shape >= 2.0 && shape < 4.0) ? 1.0 - smoothstep(0.75, 1.0, t) : pow(1.0 - t, shape == 1.0 ? 1.0 : 1.5);
+	if (smoke) fadeOut = 1.0 - smoothstep(0.15, 1.0, t);
 	if (shape == 5.0) fadeOut = sin(t * 3.1415927);
 	float fade = min(age * 30.0, 1.0) * fadeOut;
 	fade *= clamp((-eye.z - 4.0) / 24.0, 0.0, 1.0);
@@ -376,6 +523,10 @@ void WeatherVertex()
 
 void main()
 {
+	vVolumeRow0 = vec4(0.0);
+	vVolumeRow1 = vec4(0.0);
+	vVolumeRow2 = vec4(0.0);
+	vVolumeParams = vec4(0.0);
 	float ClipDistance0, ClipDistance1, ClipDistance2, ClipDistance3, ClipDistance4;
 
 	#ifndef SIMPLE

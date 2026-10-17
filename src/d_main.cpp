@@ -3704,6 +3704,14 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<std::string>& allw
 
 static int D_DoomMain_Internal (void)
 {
+    // Standalone products can bundle their own IWAD alongside engine resources.
+    FString standalone = progdir + "standalone.ipk3";
+    if (!Args->CheckParm("-iwad") && FileExists(standalone.GetChars()))
+    {
+        Args->AppendArg("-iwad");
+        Args->AppendArg(standalone);
+    }
+
 	const char *wad;
 	FIWadManager *iwad_man;
 

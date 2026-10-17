@@ -24,8 +24,8 @@ struct FTraceResults;
 //   v(t) = (v0 - g/k) e^(-k t) + g/k
 //   p(t) = p0 + (g/k) t + (v0 - g/k) (1 - e^(-k t)) / k
 //
-// Particles that fall come to rest on the floor (or 3D floor) below where
-// their trajectory lands, sparks and tracers stretch along their screen-space
+// Solid fragments bounce twice and settle on the floor (or 3D floor) below
+// where their trajectory lands; sparks and tracers stretch along their screen-space
 // velocity, and smoke and dust take the colour of the surface that was hit.
 // Non-emissive particles are lit in the vertex shader by the sector light at
 // spawn, the baked GI, the strongest dynamic lights near the camera and
@@ -34,8 +34,12 @@ struct FTraceResults;
 //
 // The CPU only appends to the ring: a slot is written once, when a particle is
 // spawned, and never modified while it can still be drawn, so frames still in
-// flight on the GPU keep reading consistent data. When the ring is full the
-// oldest slot is reused; with 16384 slots that is long dead.
+// flight on the GPU keep reading consistent data. A full ring drops new
+// emissions; eight distinct rendered frames protect slots still in flight.
+// Emission and large smoke counts also have hard per-tic limits. Mode 3 adds
+// layered material impacts, scaling new emissions by camera distance, ring
+// pressure and measured rendered-frame intervals. r_gpuparticles_status reports
+// the budget and counters ("reset" clears counters without touching particles).
 //
 // Game code can spawn them too (LevelLocals.SpawnFXParticles, FXEmitter in
 // ZScript). They stay visual-only: their own random generator, no game state.
@@ -74,6 +78,7 @@ enum EFXFlags
 	FXF_Additive = 1,		// additive blend, emissive (sparks, embers, fire)
 	FXF_Unlit = 2,			// alpha blended but emissive: not lit by the scene
 	FXF_RestOnFloor = 4,	// land on the floor or 3D floor below the trajectory
+	FXF_NoDistanceScale = 8,	// no thinning with camera distance, for effects seen from afar (FX_SpawnScriptedParticles)
 };
 
 // Parameters of LevelLocals.SpawnFXParticles (ZScript struct FXParticleParams).
@@ -100,3 +105,5 @@ struct FFXParticleParams
 };
 
 void FX_SpawnScripted(FLevelLocals *level, const FFXParticleParams &params);
+// LevelLocals.SpawnFXParticles: FX_SpawnScripted plus the FXF_NoDistanceScale flag.
+void FX_SpawnScriptedParticles(FLevelLocals *level, const FFXParticleParams &params);

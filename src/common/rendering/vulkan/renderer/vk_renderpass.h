@@ -33,6 +33,7 @@ public:
 	int VertexFormat;
 	int DrawType;
 	int NumTextureLayers;
+	int SunShading;	// the program's sun variant (hw_sun.h)
 
 	bool operator<(const VkPipelineKey &other) const { return memcmp(this, &other, sizeof(VkPipelineKey)) < 0; }
 	bool operator==(const VkPipelineKey &other) const { return memcmp(this, &other, sizeof(VkPipelineKey)) == 0; }

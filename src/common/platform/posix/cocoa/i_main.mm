@@ -231,6 +231,17 @@ int DoMain(int argc, char** argv)
 		progdir = [[exePath stringByDeletingLastPathComponent] UTF8String];
 	progdir += "/";
 
+    NSString *standalone = [[NSString stringWithUTF8String:progdir.GetChars()] stringByAppendingPathComponent:@"standalone.ipk3"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:standalone] && !Args->CheckParm("-config"))
+    {
+        NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+        NSString *identifier = NSBundle.mainBundle.bundleIdentifier ?: @"StandaloneGZDoom";
+        NSString *directory = [support.path stringByAppendingPathComponent:identifier];
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+        Args->AppendArg("-config");
+        Args->AppendArg([[directory stringByAppendingPathComponent:@"game.ini"] UTF8String]);
+    }
+
 	auto ret = GameMain();
 	FConsoleWindow::DeleteInstance();
 	return ret;

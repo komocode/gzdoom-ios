@@ -48,6 +48,19 @@ struct HWViewpointUniforms
 	FVector4 mWeatherParams = { 0, 0, 0, 0 };	// cell count y, lightning flash (0-1), time in seconds, unused
 	FVector4 mSceneDepthMap = { 0, 0, 0, 0 };	// fragment position to half-res linear depth texel: scale (xy), offset (zw)
 
+	FVector4 mReflectionOrigin = { 0, 0, 0, 1 }; // Doom XYZ origin and probe spacing
+	FVector4 mReflectionSize = { 0, 0, 0, 0 }; // XYZ probe counts, first atlas array layer
+	FVector4 mReflectionAtlas = { 0, 0, 0, 0 }; // tiles per layer XY, octahedral resolution, enabled
+
+	// Directional sun (hw_sun.h). Vectors use the shaders' axis order (x, height, y).
+	FVector4 mSunDir = { 0, 0, 0, 0 };		// xyz = unit vector toward the sun, w = 1 when the sun shines
+	FVector4 mSunColor = { 0, 0, 0, 0 };	// rgb = linear colour * intensity, w = specular scale
+	FVector4 mSunShadowU = { 0, 0, 0, 0 };	// shadow map texel x of a position p: dot(row, vec4(p, 1))
+	FVector4 mSunShadowV = { 0, 0, 0, 0 };	// texel y
+	FVector4 mSunShadowD = { 0, 0, 0, 0 };	// depth along the sunlight, in map units
+	FVector4 mSunParams = { 0, 0, 0, 0 };	// shadow map width, height (0 = unshadowed), softness (texels), map units per texel
+	FVector4 mSunParams2 = { 0, 0, 0, 0 };	// x > 0: fixed light factor for surfaces without a normal (HUD), y = 1 for the HUD
+
 	void CalcDependencies()
 	{
 		mNormalViewMatrix.computeNormalMatrix(mViewMatrix);

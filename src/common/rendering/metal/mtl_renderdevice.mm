@@ -202,6 +202,7 @@ void MetalRenderDevice::ApplyAutoQuality()
 	gl_fxaa = s.fxaa;
 	gl_ssao = s.ssao;
 	gl_bloom = s.bloom;
+	R_SetDeviceBloom(s.bloom);	// MAPINFO forcebloom must not undo this either
 	gl_texture_filter_anisotropic = s.anisotropy;
 	// Mobile keeps height-correct traced shadows with one ray. Desktop starts
 	// with nine, rather than assuming Ultra's 27 rays fit every GPU.
@@ -854,6 +855,8 @@ void MetalRenderDevice::QueuePipelines(bool both)
 		if (shaders)
 			mRenderState->QueueScenePipelines(shaders, formats, samples);
 	}
+	if (mSunPrewarm)
+		mRenderState->QueueScenePipelines(mShaderManager.get(), formats, samples, true);
 }
 
 void MetalRenderDevice::InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t> &LMTextureData)
@@ -874,6 +877,35 @@ bool MetalRenderDevice::InitWeatherMap(int width, int height, TArray<uint16_t> &
 {
 	mTextureManager->SetWeatherMap(width, height, rgbaHalfData);
 	return true;
+}
+
+bool MetalRenderDevice::InitSunShadowMap(int width, int height, const float *depth)
+{
+	mTextureManager->SetSunShadowMap(width, height, depth);
+	return true;
+}
+
+void MetalRenderDevice::PrecacheSunShaders(const TArray<int> &userShaders)
+{
+	if (!mShadersReady)
+		return;
+	// The sun variants of the textured, warped and untextured programs and of the
+	// level's user shaders, in the pass the main view draws with, are compiled now,
+	// while the level loads (the others when first drawn). Their common pipelines
+	// then compile in the background like the startup prewarm.
+	EPassType passType = PPAmbientOcclusion::GBufferNeeded() ? GBUFFER_PASS : NORMAL_PASS;
+	std::vector<MtlShaderProgram*> programs;
+	for (unsigned int eff = 0; eff <= SHADER_NoTexture; eff++)
+	{
+		for (bool alphatest : { false, true })
+			programs.push_back(mShaderManager->Get(eff, alphatest, passType));
+	}
+	for (int index : userShaders)
+		programs.push_back(mShaderManager->Get(index, true, passType));
+	mShaderManager->PrecacheSunVariants(programs);
+	mSunPrewarm = true;
+	memset(mPrewarmSignature, -1, sizeof(mPrewarmSignature));
+	QueuePipelines(true);
 }
 
 void MetalRenderDevice::Draw2D()
