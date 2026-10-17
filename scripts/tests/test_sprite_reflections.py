@@ -37,7 +37,7 @@ void require(bool condition, const char *message) {
     if (!condition) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 void Quad(BakeJob &job, Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 normal, Vec3 color) {
-    Material material{}; material.albedo = color; material.light = {1, 1, 1};
+    Material material{}; material.albedo = color; material.light = {1, 1, 1}; material.lit = 1;
     int index = int(job.materials.size()); job.materials.push_back(material);
     job.triangles.push_back({a, b-a, c-a, normal, index});
     job.triangles.push_back({a, c-a, d-a, normal, index});
@@ -80,10 +80,11 @@ int main() {
     }
     require(red && blue,"sharp radiance must preserve distinct colored walls");
     BakeJob textured; Room(textured,false);
-    ReflectionTexture texture; texture.width=2; texture.height=1; texture.linearPixels={{1,0,0},{0,1,0}};
+    ReflectionTexture texture; texture.width=2; texture.height=1; texture.pixels={{{1,0,0},{}},{{0,1,0},{}}};
     textured.reflectionTextures.push_back(texture);
     Material &m=textured.materials[0]; m.reflectionTexture=0; m.textureU={0,1.f/128.f,0};
-    Vec3 a=textured.ShadeHit({-64,16,64},textured.triangles[0],true), b=textured.ShadeHit({-64,-16,64},textured.triangles[0],true);
+    const Triangle &wall=textured.triangles[0];
+    Vec3 a=textured.ShadeHit({-64,16,64},{-1,0,0},wall,wall.normal,true), b=textured.ShadeHit({-64,-16,64},{-1,0,0},wall,wall.normal,true);
     require(a.x==1.f && b.y==1.f,"hit-coordinate texture sampling and negative UV wrapping");
     BakeJob invalid; Room(invalid,false); invalid.reflectionOrigin.x=256; invalid.BakeReflection(0);
     require(!invalid.reflectionProbes[0].valid,"outside/backface probes must be rejected");

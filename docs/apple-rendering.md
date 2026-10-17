@@ -872,8 +872,8 @@ Names must match each active frame and rotation. Full-path textures use the
 source path without its extension after the channel directory. Existing GLDEFS
 `material sprite` declarations also work. Author tangent normals with green +Y
 pointing upward (neutral RGB 128,128,255), scalar roughness/metallic/AO in red,
-and the original framing. The renderer aligns map borders and dimensions; AI
-output still needs pixel alignment checks before packaging. Authored specular
+and the original framing. The renderer aligns map borders and dimensions; check
+pixel alignment of generated maps before packaging. Authored specular
 maps retain their workflow. Partial maps use constant neutral defaults for
 missing channels, never material guesses from colour.
 

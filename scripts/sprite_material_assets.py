@@ -2,7 +2,7 @@
 """Extract exact sprite pixels/offsets and assemble authored material PK3 files.
 
 No surface shape or materials are inferred. Extraction never changes the input
-archives. AI/artist-produced atlas channels must exactly match atlas dimensions.
+archives. Authored atlas channels must exactly match atlas dimensions.
 Requires Pillow. Outputs include copyrighted source pixels: keep them local.
 """
 from __future__ import annotations
@@ -258,7 +258,7 @@ def main():
     export.add_argument("--atlas-size", type=int, default=1024)
     export.add_argument("--family", action="append", help="Limit to one or more four-character sprite families")
     export.set_defaults(func=extract)
-    bundle = sub.add_parser("pack", help="Crop artist/AI-authored atlases into engine material maps")
+    bundle = sub.add_parser("pack", help="Crop authored atlases into engine material maps")
     bundle.add_argument("--manifest", required=True)
     bundle.add_argument("--authored", required=True, help="Directory with channel/ATLAS_NAME.png files")
     bundle.add_argument("--output", required=True, help="Destination PK3")
