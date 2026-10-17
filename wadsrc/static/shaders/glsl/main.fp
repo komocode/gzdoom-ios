@@ -1297,7 +1297,34 @@ void SetMaterialProps(inout Material material, vec2 texCoord)
 // The reflection normal follows the texture relief, toned down so
 // reflections don't get noisy, and rain ripples where it rains.
 //
+// MAPINFO wettexels (uWeatherParams.w) makes wet floors a texel mosaic, like
+// wet pixel art: each texel either holds a water film that mirrors the scene
+// or stays matte. Glossy texels (low authored roughness, else bright ones)
+// take the film first and a per-texel hash spreads the rest; film texels tilt
+// a little toward or away from the viewer, so lamps and the sun reflect as
+// broken vertical streaks. The film sets the roughness every light uses.
+//
 //===========================================================================
+
+const float WET_FILM_SHARE = 0.6;		// share of film texels at full wetness
+const float WET_PUDDLE_SHARE = 0.6;		// and in puddles
+const float WET_FILM_REFLECT = 0.8;		// film texels' reflectivity (at least)
+const float WET_MATTE_REFLECT = 0.2;	// matte texels keep this part of it
+const float WET_FILM_ROUGH = 0.1;
+const float WET_MATTE_ROUGH = 0.6;		// matte texels are at least this rough
+const float WET_FILM_TILT = 0.16;		// spread of the film texels' normals toward the viewer
+
+float TexelHash(vec2 cell, uint salt)
+{
+	uvec2 c = uvec2(ivec2(cell));
+	uint h = (c.x * 0x8da6b343u) ^ (c.y * 0xd8163841u) ^ (salt * 0xcb1ab31fu);
+	h ^= h >> 15u;
+	h *= 0x2c1b3c6du;
+	h ^= h >> 12u;
+	h *= 0x297a2d39u;
+	h ^= h >> 15u;
+	return float(h & 0xffffffu) * (1.0 / 16777215.0);
+}
 
 void SetupReflection(inout Material material)
 {
@@ -1324,10 +1351,29 @@ void SetupReflection(inout Material material)
 #endif
 	// Without an authored roughness, brighter and smoother texels are glossier.
 	roughness = clamp(roughness + (0.4 - lum) * 0.15 * (1.0 - uMaterialParams.y), 0.0, 1.0);
+	float gloss = 1.0 - roughness;
 	reflectivity = max(reflectivity, wet * 0.35 * up);
 	roughness = min(roughness, mix(1.0, 0.35, wet * up));
-	reflectivity = mix(reflectivity, 0.85, gPuddle);
-	roughness = mix(roughness, 0.04, gPuddle);
+
+	float mosaic = clamp(uWeatherParams.w, 0.0, 1.0) * up * smoothstep(0.1, 0.5, wet);
+	float film = 0.0;
+	vec2 cell = vec2(0.0);
+	if (mosaic > 0.0)
+	{
+		cell = floor(gTexCoord * vec2(textureSize(tex, 0)));
+		float score = 0.5 * (TexelHash(cell, 0u) + gloss);
+		float cut = 1.0 - mix(WET_FILM_SHARE * wet, WET_PUDDLE_SHARE, gPuddle);
+		film = smoothstep(cut - 0.03, cut + 0.03, score);
+		reflectivity = mix(reflectivity, mix(reflectivity * WET_MATTE_REFLECT, max(reflectivity, WET_FILM_REFLECT), film), mosaic);
+		roughness = mix(roughness, mix(max(roughness, WET_MATTE_ROUGH), WET_FILM_ROUGH, film), mosaic);
+	}
+	// In the mosaic only a puddle's film texels are mirrors; grit breaks up the rest.
+	float pool = gPuddle * mix(1.0, film, mosaic);
+	reflectivity = mix(reflectivity, 0.85, pool);
+	roughness = mix(roughness, 0.04, pool);
+#ifdef PBR
+	material.Roughness = mix(material.Roughness, roughness, mosaic);
+#endif
 	gReflectivity = reflectivity;
 	gRoughness = roughness;
 
@@ -1341,6 +1387,13 @@ void SetupReflection(inout Material material)
 #endif
 	if (dot(n, n) < 0.5) n = geom;
 	n = normalize(mix(geom, n, 0.35 * (1.0 - gPuddle)));
+	if (film * mosaic > 0.0)
+	{
+		vec3 v = uCameraPos.xyz - pixelpos.xyz;
+		vec3 t = v - geom * dot(v, geom);
+		float tl = length(t);
+		if (tl > 1e-3) n = normalize(n + t * ((TexelHash(cell, 1u) - 0.5) * WET_FILM_TILT * film * mosaic / tl));
+	}
 
 	float ripples = uMaterialParams2.z * up * max(wet, 0.25);
 	if (ripples > 0.0)

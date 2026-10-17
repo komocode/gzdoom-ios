@@ -295,6 +295,8 @@ with roughness down to 0.35; puddles at 0.85 with roughness 0.04 and no
 parallax. The reflection normal follows the normal map or the automatic
 relief at 35 % strength (none inside puddles). Liquids on 3D floors are
 detected from the plane's own texture, not the floor of the sector they sit in.
+MAPINFO `wettexels` breaks wet floors and puddles into a mosaic of mirror and
+matte texels (see [Map atmosphere](#map-atmosphere)).
 
 ## Weather, lightning and scripted particles
 
@@ -349,6 +351,7 @@ gimoon = 35, 28, "9cb4ff", 2.5, 24   // GI moon: yaw, pitch, colour, intensity, 
 rainscatter = 1.5                    // volumetric scattering added by rain
 volumetricstrength = 0.4             // multiplies r_volumetric_strength on this map (0-8)
 ssrstretch = 4                       // replaces r_ssr_stretch on this map (> 0)
+wettexels = 1                        // wet floors as a texel mosaic (0-1)
 forceheightfog                       // height fog even with r_heightfog off
 forcebloom                           // bloom even with gl_bloom off
 ```
@@ -384,6 +387,19 @@ forcebloom                           // bloom even with gl_bloom off
   value, not an override of a preference, so `r_map_atmosphere 0` keeps it.
   `stat volumetric` shows it as "map strength". Single lights can be scaled
   with their `arg4` (see [Light definitions](#light-definitions)).
+- **`wettexels`** (0-1) draws wet floors as a texel mosaic, like wet pixel
+  art: each texel of the floor texture either holds a water film that
+  mirrors the scene (reflectivity at least 0.8, roughness 0.1) or stays matte
+  grit (a fifth of the wet reflectivity, roughness at least 0.6). Glossy
+  texels (low authored roughness, else bright ones) take the film first and a
+  per-texel hash spreads the rest: 60 % x wetness of the texels hold film, and
+  60 % inside puddles, whose matte texels break them up. Film texels tilt a
+  little toward or away from the viewer, so lamps and the sun reflect as
+  broken vertical streaks, and the film sets the roughness that dynamic lights
+  and the sun use. The value fades the mosaic in over the plain wet look;
+  up-facing floors wetter than about 0.1 take part. It costs two hashes per
+  wet pixel. A material look, not an override of a preference, so
+  `r_map_atmosphere 0` keeps it. It rides in `uWeatherParams.w`.
 - **`forceheightfog`**, **`forcebloom`** and **`ssrstretch`** override the
   player's `r_heightfog`, `gl_bloom` and `r_ssr_stretch` on this map without
   changing the CVARs (nothing is written to the ini). Height fog still needs

@@ -345,9 +345,9 @@ struct FWeatherSettings
 };
 
 // Opt-in map atmosphere (MAPINFO gisky, gimoon, rainscatter, volumetricstrength,
-// ssrstretch, forceheightfog, forcebloom). Maps without these keys render as
-// before. The overrides never write the user's CVARs; r_map_atmosphere 0 ignores
-// the last three.
+// wettexels, ssrstretch, forceheightfog, forcebloom). Maps without these keys
+// render as before. The overrides never write the user's CVARs;
+// r_map_atmosphere 0 ignores the last three.
 struct FMapAtmosphereInfo
 {
 	bool GISky = false;				// gisky: replaces the sky texture's average colour in the GI bake
@@ -361,6 +361,7 @@ struct FMapAtmosphereInfo
 	float RainScatter = 0.f;		// extra volumetric scattering per unit of rain density
 	float VolumetricStrength = 1.f;	// volumetricstrength: multiplies r_volumetric_strength (in-scattered light only)
 	float SSRStretch = 0.f;			// > 0 replaces r_ssr_stretch
+	float WetTexels = 0.f;			// wettexels: wet floors as a texel mosaic (0-1)
 	bool ForceHeightFog = false;	// height fog even with r_heightfog off (needs r_volumetric)
 	bool ForceBloom = false;		// bloom even with gl_bloom off
 };

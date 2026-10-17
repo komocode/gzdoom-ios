@@ -45,7 +45,7 @@ struct HWViewpointUniforms
 	FVector4 mGISize = { 0, 0, 0, 0 };		// probe counts (x, height, y), w = 1 when a volume is bound
 	// Sky exposure map (hw_weather.h): map origin (x, y), 1 / cell size, cell count x; w = 0 when no map is bound
 	FVector4 mWeatherMap = { 0, 0, 0, 0 };
-	FVector4 mWeatherParams = { 0, 0, 0, 0 };	// cell count y, lightning flash (0-1), time in seconds, unused
+	FVector4 mWeatherParams = { 0, 0, 0, 0 };	// cell count y, lightning flash (0-1), time in seconds, MAPINFO wettexels (0-1)
 	FVector4 mSceneDepthMap = { 0, 0, 0, 0 };	// fragment position to half-res linear depth texel: scale (xy), offset (zw)
 
 	FVector4 mReflectionOrigin = { 0, 0, 0, 1 }; // Doom XYZ origin and probe spacing

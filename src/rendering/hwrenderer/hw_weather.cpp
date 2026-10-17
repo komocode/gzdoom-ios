@@ -324,15 +324,17 @@ void Weather_Update(FLevelLocals *level)
 void Weather_SetUniforms(HWDrawInfo *di, HWViewpointUniforms &uniforms)
 {
 	FLevelLocals *level = di->Level;
+	// The w of the weather parameters carries the map's wettexels (main.fp).
+	float wetTexels = level ? level->atmosphere.WetTexels : 0.f;
 	if (exposure.bound && exposure.level == level)
 	{
 		uniforms.mWeatherMap = { float(exposure.originX), float(exposure.originY), float(1.0 / exposure.cellSize), float(exposure.width) };
-		uniforms.mWeatherParams = { float(exposure.height), FlashIntensity(level, di->Viewpoint.TicFrac), WeatherTime(level, di->Viewpoint.TicFrac), 0.f };
+		uniforms.mWeatherParams = { float(exposure.height), FlashIntensity(level, di->Viewpoint.TicFrac), WeatherTime(level, di->Viewpoint.TicFrac), wetTexels };
 	}
 	else
 	{
 		uniforms.mWeatherMap = { 0, 0, 0, 0 };
-		uniforms.mWeatherParams = { 0, 0, 0, 0 };
+		uniforms.mWeatherParams = { 0, 0, 0, wetTexels };
 	}
 
 	// Maps a scene fragment position to the half-resolution linear depth of

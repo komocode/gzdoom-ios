@@ -1752,6 +1752,16 @@ DEFINE_MAP_OPTION(ssrstretch, false)
 	info->atmosphere.SSRStretch = (float)clamp(parse.sc.Float, 0., 8.);
 }
 
+// wettexels = amount (0-1): wet floors and puddles become a texel mosaic, like
+// wet pixel art: each texel holds either a mirror-like water film or matte grit
+// (main.fp, SetupReflection). A material look, so r_map_atmosphere 0 keeps it.
+DEFINE_MAP_OPTION(wettexels, false)
+{
+	parse.ParseAssign();
+	parse.sc.MustGetFloat();
+	info->atmosphere.WetTexels = (float)clamp(parse.sc.Float, 0., 1.);
+}
+
 // forceheightfog and forcebloom, optionally '= true' or '= false' (also on/off, yes/no, 1/0).
 static bool ParseAtmosphereFlag(FMapInfoParser &parse)
 {

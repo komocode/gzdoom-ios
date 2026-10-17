@@ -16,7 +16,7 @@ struct HWViewpointUniforms;
 //
 //   WeatherMap (set 0, binding 4; Metal texture 15), read with texelFetch.
 //   uWeatherMap = map origin x, y, 1 / cell size, cell count x (0: no map)
-//   uWeatherParams = cell count y, lightning flash 0-1, time, unused
+//   uWeatherParams = cell count y, lightning flash 0-1, time, MAPINFO wettexels
 //   main.vp / main.fp: WeatherCell(mapPos), WeatherExposure(worldPos) returns 1
 //   where a point is under open sky (rain falls on it, lightning lights it).
 //
